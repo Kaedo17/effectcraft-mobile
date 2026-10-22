@@ -37,10 +37,10 @@ mod control_server;
 mod launch_guard;
 #[cfg(target_os = "macos")]
 mod native_menu;
-// Built everywhere it compiles so it stays checked; only the macOS app uses it. Android has
-// no rfd at all (no backend there), so it isn't built for Android.
+// Built everywhere so it stays checked; the macOS and Linux apps use it. Android has no rfd
+// at all (no backend there), so it isn't built for Android.
 #[cfg(not(target_os = "android"))]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 mod sheet_dialogs;
 mod window;
 
@@ -427,11 +427,20 @@ fn run_inner(
                     app.hooks.shared_storage_grant = Some(a.ask);
                 }
             }
-            #[cfg(target_os = "macos")]
+            // The commands' file dialogs don't block the frame where the platform's backend
+            // would (#511, #1275): on macOS as sheets instead of nested modal loops, on Linux
+            // through the desktop portal from a worker thread — a blocking portal dialog leaves
+            // the main thread waiting on its answer without pumping events, so the window stops
+            // answering the compositor and the desktop offers to force-quit it while the Open
+            // dialog is up. Windows' blocking dialog pumps its own messages; Android has no
+            // rfd at all (the in-app browser serves the dialogs).
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
-                // The commands' file dialogs open as sheets instead of nested modal loops (#511).
                 let ctx = cc.egui_ctx.clone();
                 app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| sheet_dialogs::show(dialog, done, ctx.clone())));
+            }
+            #[cfg(target_os = "macos")]
+            {
                 app.hooks.app_action = Some(Box::new(native_menu::app_action));
                 app.hooks.clipboard_text = Some(Box::new(native_menu::clipboard_text));
             }
@@ -602,7 +611,8 @@ fn disable_app_nap() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, parse_args};
+    use super::{Args, parse_args, sheet_dialogs};
+    use effectcraft_ui_egui::{DialogDone, FileDialog};
     use std::env::VarError;
 
     fn parse_env(args: &[&str], env_port: Result<String, VarError>) -> Result<Option<Args>, String> {
@@ -727,5 +737,22 @@ mod tests {
             let not_utf8 = VarError::NotUnicode(std::ffi::OsString::from_vec(vec![0x39, 0xff]));
             assert_eq!(parse_env(&[], Err(not_utf8)).unwrap_err(), format!("{need}, not `9\u{fffd}`"));
         }
+    }
+
+    /// #1275: a blocking desktop-portal dialog on Linux leaves the window not answering the
+    /// compositor while it is open, so the commands' file dialogs go through the non-blocking
+    /// host hook there (as they do on macOS, #511). Windows' dialog pumps its own messages.
+    #[test]
+    fn commands_file_dialogs_go_through_the_non_blocking_hook() {
+        let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let ctx = egui::Context::default();
+            app.hooks.file_dialog_async = Some(Box::new(move |dialog: FileDialog, done: DialogDone| sheet_dialogs::show(dialog, done, ctx.clone())));
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(app.hooks.file_dialog_async.is_some(), "the commands' file dialogs must not block the frame");
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(app.hooks.file_dialog_async.is_none(), "the blocking dialog pumps its own messages here");
     }
 }
