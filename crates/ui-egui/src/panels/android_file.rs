@@ -379,6 +379,8 @@ pub struct AndroidFileDraft {
     /// How the browser and the Open Project list show their entries ([`stored_view`] at open,
     /// [`remember_view`] on switch).
     pub view: PickView,
+    /// A save that would replace an existing file: the target waiting for "Replace?".
+    pub(crate) replace: Option<PathBuf>,
 }
 
 /// Serve a file-dialog request with the in-app prompt: stash it, open the modal, and continue
@@ -502,9 +504,16 @@ pub fn show(app: &mut crate::EffectcraftApp, ctx: &egui::Context, t: &crate::the
             let loc = app.dialog_state.android_file.folder.clone().unwrap_or_else(|| save_dir(&base, project));
             // (The tablet's soft keyboard appears when the field is tapped; winit raises the IME.)
             let mut name = std::mem::take(&mut app.dialog_state.android_file.name);
+            // The target the pending "Replace?" row is about; a name edited since then re-asks.
+            let target = save_path_in(&loc, project, &name, &fallback);
+            if app.dialog_state.android_file.replace.as_deref().is_some_and(|pending| pending != target) {
+                app.dialog_state.android_file.replace = None;
+            }
+            let asking = app.dialog_state.android_file.replace.clone();
             let mut save = false;
             let mut cancel = false;
             let mut change = false;
+            let mut replace = false;
             super::dialogs::modal(ctx, if project { "Save Project" } else { "Save File" }, egui::vec2(440.0, 240.0), t, |ui| {
                 ui.label(format!("Location: {}", loc.to_string_lossy()));
                 if ui.button(tr("Change…")).clicked() {
@@ -513,19 +522,41 @@ pub fn show(app: &mut crate::EffectcraftApp, ctx: &egui::Context, t: &crate::the
                 ui.add_space(8.0);
                 ui.add(egui::TextEdit::singleline(&mut name).hint_text(&fallback).desired_width(f32::INFINITY));
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    save = ui.button(tr("Save")).clicked();
-                    cancel = ui.button(tr("Cancel")).clicked();
-                });
+                if let Some(pending) = &asking {
+                    let shown = pending.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(crate::i18n::tr_args(tr("{} already exists. Replace it?"), &[&shown]));
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        replace = ui.button(tr("Replace")).clicked();
+                        cancel = ui.button(tr("Cancel")).clicked();
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        save = ui.button(tr("Save")).clicked();
+                        cancel = ui.button(tr("Cancel")).clicked();
+                    });
+                }
             });
             app.dialog_state.android_file.name = name;
-            if change {
+            if let Some(pending) = asking.filter(|_| replace) {
+                app.dialog_state.android_file.replace = None;
+                finish(app, vec![pending.to_string_lossy().to_string()]);
+            } else if change {
+                app.dialog_state.android_file.replace = None;
                 app.dialog_state.android_file.folder = Some(loc.clone());
                 app.dialog_state.android_file.browser = Some(loc);
             } else if save {
+                // Recompute from the field as it stands now: the row above is only a hint.
                 let path = save_path_in(&loc, project, &app.dialog_state.android_file.name, &fallback);
-                finish(app, vec![path.to_string_lossy().to_string()]);
+                if path.exists() {
+                    app.dialog_state.android_file.replace = Some(path);
+                } else {
+                    finish(app, vec![path.to_string_lossy().to_string()]);
+                }
             } else if cancel {
+                app.dialog_state.android_file.replace = None;
                 finish(app, Vec::new());
             }
         }
