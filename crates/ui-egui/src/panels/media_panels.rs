@@ -26,7 +26,6 @@ use crate::{EffectcraftApp, widgets};
 /// The Media Browser's folder listing, shared per frame (the listing is minuted in a temp).
 type Listing = (f64, Arc<Result<Vec<mb::Entry>, String>>);
 
-
 pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
