@@ -18,15 +18,22 @@ patch adds one method, `EventLoop::dispatch_mouse_input`, and one call to it:
 
 - pointers whose `Source` is `Mouse` or `Touchpad` are routed to the new method
   (touchscreen and touch-dragged stylus pointers keep the untouched `Touch` path);
-- `Scroll` becomes `MouseWheel { delta: LineDelta(h, v) }` from the event's
-  `Vscroll`/`Hscroll` axes;
-- `ButtonPress`/`ButtonRelease` become `MouseInput` for the button in
-  `action_button()` (right, middle, back, forward, and primary if a device sends
-  it that way), preceded by a `CursorMoved`;
-- a mouse's primary button arrives as an ordinary `Down`/`Up` (per Android's
-  button-event rules), which become `MouseInput` for `MouseButton::Left`;
+- `Scroll` becomes `MouseWheel { delta: LineDelta(-h, v) }` from the event's `Hscroll`/`Vscroll`
+  axes (Android's horizontal axis scrolls the viewport the other way round from winit's positive
+  `x`; the vertical one already matches);
+- `ButtonPress`/`ButtonRelease` become `MouseInput` for the button in `action_button()` (right,
+  middle, back, forward, and primary if a device sends it that way), preceded by a `CursorMoved`;
+- the button that *starts* a gesture arrives as an ordinary `Down`/`Up` (per Android's
+  button-event rules): `Down` is reported as the button in the event's `button_state()` (a
+  touchpad tap has none, and is the primary button), and `Up`, whose state is already cleared, as
+  the button the gesture reported down. A press or release already reported is not repeated, so a
+  device that also sends `ButtonPress`/`ButtonRelease` for the first button does not look like a
+  double click;
 - `Move`/`HoverMove` become `CursorMoved`, `HoverEnter`/`HoverExit` become
   `CursorEntered`/`CursorLeft`, so the cursor tracks the mouse without a press.
+
+Which button a `Down` reported is remembered (a bitmask on the event loop), so `Up` releases the
+same button(s) even though Android has cleared its state by then, and no button is reported twice.
 
 Keyboard events are **not** touched here: upstream also never emits
 `ModifiersChanged` on Android (it ignores the meta state Android carries on every
@@ -53,3 +60,7 @@ Licensed Apache-2.0, as upstream; `LICENSE` is upstream's, and `Cargo.toml`,
 `src/` and `tests/` are byte-identical to the published crate, `docs/` and
 `examples/` identical apart from the images dropped as described above; the only
 source change is the one file.
+
+This delta was written and validated on hardware for FilmCraft's Android port
+(`Kaedo17/filmcraft-mobile` `685c9cc3`), then carried through PhotoCraft's port,
+which EffectCraft's copy follows.

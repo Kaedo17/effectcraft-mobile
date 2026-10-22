@@ -143,6 +143,10 @@ pub struct EventLoop<T: 'static> {
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
+    /// The mouse buttons this press gesture has reported down, as [`Self::BUTTONS`] bits: `Down`
+    /// says which button started the gesture (Android reports *any* first button as `Down`, with
+    /// the button in the event's state), while the matching `Up` has already cleared that state.
+    mouse_buttons: Cell<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +158,39 @@ pub(crate) struct PlatformSpecificEventLoopAttributes {
 impl Default for PlatformSpecificEventLoopAttributes {
     fn default() -> Self {
         Self { android_app: Default::default(), ignore_volume_keys: true }
+    }
+}
+
+/// One bit per button this backend reports, for [`EventLoop::mouse_buttons`].
+fn mouse_button_bit(button: event::MouseButton) -> u8 {
+    use event::MouseButton;
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 1 << 1,
+        MouseButton::Middle => 1 << 2,
+        MouseButton::Back => 1 << 3,
+        MouseButton::Forward => 1 << 4,
+        MouseButton::Other(_) => 0,
+    }
+}
+
+/// The button Android reports as down in `motion_event`, if any: `Down` carries the gesture's
+/// starting button in the event's state (a touchpad tap has no button set).
+fn button_in_state(motion_event: &MotionEvent<'_>) -> Option<event::MouseButton> {
+    use event::MouseButton;
+    let state = motion_event.button_state();
+    if state.primary() {
+        Some(MouseButton::Left)
+    } else if state.secondary() {
+        Some(MouseButton::Right)
+    } else if state.teriary() {
+        Some(MouseButton::Middle)
+    } else if state.back() {
+        Some(MouseButton::Back)
+    } else if state.forward() {
+        Some(MouseButton::Forward)
+    } else {
+        None
     }
 }
 
@@ -192,6 +229,7 @@ impl<T: 'static> EventLoop<T> {
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
+            mouse_buttons: Cell::new(0),
         })
     }
 
@@ -524,19 +562,23 @@ impl<T: 'static> EventLoop<T> {
 
         match motion_event.action() {
             MotionAction::Scroll => {
-                // One wheel notch is one scroll unit; Android reports the vertical axis
-                // positive upwards, the convention winit's other backends use as well.
+                // One wheel notch is one scroll unit. Android's vertical axis points the same way
+                // as winit's convention (positive = the content moves down, i.e. `MouseWheel`
+                // "up"), but its horizontal axis is the other way round: a positive
+                // `AXIS_HSCROLL` scrolls the viewport right, moving the content left, where a
+                // positive winit `LineDelta` x moves the content right.
                 let (h, v) = match &pointer {
-                    Some(p) => (p.axis_value(Axis::Hscroll), p.axis_value(Axis::Vscroll)),
+                    Some(p) => (-p.axis_value(Axis::Hscroll), p.axis_value(Axis::Vscroll)),
                     None => (0.0, 0.0),
                 };
                 let delta = MouseScrollDelta::LineDelta(h, v);
                 dispatch(WindowEvent::MouseWheel { device_id, delta, phase: TouchPhase::Moved });
             },
             MotionAction::ButtonPress | MotionAction::ButtonRelease => {
-                // Only a press or a release carries the button that changed; the primary
-                // button normally arrives as Down/Up instead, but report it if a device
-                // sends it here too.
+                // A button going down or up while a gesture is under way. The button that starts
+                // the gesture arrives as `Down`/`Up` instead (below); some devices report that
+                // first press here as well, which must not become a second press (egui would see
+                // two `Pressed` with no release between).
                 let button = match motion_event.action_button() {
                     Button::Primary => MouseButton::Left,
                     Button::Secondary => MouseButton::Right,
@@ -545,25 +587,35 @@ impl<T: 'static> EventLoop<T> {
                     Button::Forward => MouseButton::Forward,
                     _ => return InputStatus::Unhandled,
                 };
-                let state = match motion_event.action() {
-                    MotionAction::ButtonPress => ElementState::Pressed,
-                    _ => ElementState::Released,
-                };
                 if let Some(position) = position {
                     dispatch(WindowEvent::CursorMoved { device_id, position });
                 }
-                dispatch(WindowEvent::MouseInput { device_id, state, button });
+                let pressed = motion_event.action() == MotionAction::ButtonPress;
+                if self.set_mouse_button(button, pressed) {
+                    let state = if pressed { ElementState::Pressed } else { ElementState::Released };
+                    dispatch(WindowEvent::MouseInput { device_id, state, button });
+                }
             },
             MotionAction::Down | MotionAction::Up => {
-                // A mouse's primary button: Android reports it as an ordinary down/up.
                 if let Some(position) = position {
                     dispatch(WindowEvent::CursorMoved { device_id, position });
                 }
-                let state = match motion_event.action() {
-                    MotionAction::Down => ElementState::Pressed,
-                    _ => ElementState::Released,
-                };
-                dispatch(WindowEvent::MouseInput { device_id, state, button: MouseButton::Left });
+                if motion_event.action() == MotionAction::Down {
+                    // Android reports the *first* button of a gesture as an ordinary down, with
+                    // the button itself in the event's state (a touchpad tap sets none, and is a
+                    // primary click).
+                    let button = button_in_state(motion_event).unwrap_or(MouseButton::Left);
+                    if self.set_mouse_button(button, true) {
+                        dispatch(WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button });
+                    }
+                } else {
+                    // `Up` has already cleared the button state, so release what the gesture
+                    // reported down. A device that sent a `ButtonRelease` for it cleared that bit
+                    // already, and this then releases nothing.
+                    for button in self.take_mouse_buttons() {
+                        dispatch(WindowEvent::MouseInput { device_id, state: ElementState::Released, button });
+                    }
+                }
             },
             MotionAction::Move | MotionAction::HoverMove => {
                 if let Some(position) = position {
@@ -582,6 +634,30 @@ impl<T: 'static> EventLoop<T> {
             _ => return InputStatus::Unhandled,
         }
         InputStatus::Handled
+    }
+
+    /// Record `button` as down (or up) and answer whether that changed anything. A device that
+    /// reports the gesture's first press as both `Down` and `ButtonPress` therefore reports it
+    /// once, and a release only reports for a button this gesture pressed.
+    fn set_mouse_button(&self, button: event::MouseButton, pressed: bool) -> bool {
+        let bit = mouse_button_bit(button);
+        if bit == 0 {
+            return true;
+        }
+        let current = self.mouse_buttons.get();
+        let next = if pressed { current | bit } else { current & !bit };
+        self.mouse_buttons.set(next);
+        next != current
+    }
+
+    /// Every button the gesture has down, clearing the set.
+    fn take_mouse_buttons(&self) -> Vec<event::MouseButton> {
+        use event::MouseButton;
+        let held = self.mouse_buttons.replace(0);
+        [MouseButton::Left, MouseButton::Right, MouseButton::Middle, MouseButton::Back, MouseButton::Forward]
+            .into_iter()
+            .filter(|button| held & mouse_button_bit(*button) != 0)
+            .collect()
     }
 
     pub fn run<F>(mut self, event_handler: F) -> Result<(), EventLoopError>
