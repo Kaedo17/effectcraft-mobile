@@ -169,8 +169,10 @@ pub struct Hooks {
     pub app_action: Option<Box<dyn Fn(&str) -> bool>>,
     /// Shows a command's file dialog without blocking the frame and calls `done` with the
     /// answer (the host then asks for a repaint). Used in place of the blocking pickers above for
-    /// the commands' dialogs (File ▸ Import, Open, Save As…) where a modal dialog's nested event
-    /// loop inside a frame is unsafe: on macOS a drag over the window then aborted the app (#511).
+    /// the commands' dialogs (File ▸ Import, Open, Save As…) where blocking the frame is unsafe or
+    /// leaves the window unresponsive: on macOS a nested modal event loop there aborted the app on
+    /// a drag over the window (#511), and on Linux a blocking desktop-portal dialog never pumps
+    /// events, so the compositor marks the window as not responding (#1275).
     pub file_dialog_async: Option<Box<dyn Fn(FileDialog, DialogDone)>>,
     /// The app-private storage directory a host serves the in-app Save / Open Project prompts
     /// from (`AndroidApp::internal_data_path` on Android), where the in-app prompts read and
