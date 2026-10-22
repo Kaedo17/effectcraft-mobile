@@ -49,7 +49,19 @@ pub fn capture(app: &android_activity::AndroidApp) -> Option<AndroidAccess> {
         log::warn!("android access: no JVM on the activity; \"All files access\" stays unavailable");
         return None;
     }
-    Some(AndroidAccess { vm, activity })
+    // Android 10 enforces scoped storage for this targetSdk 35 app, and the opt-out
+    // (`requestLegacyExternalStorage`) is an application attribute cargo-apk 0.10 does not emit
+    // — so the legacy permission the code below checks and asks for is a lie there: it may be
+    // grantable and still open nothing past the filter. Decline the whole capability on that one
+    // version; the browser keeps its app-private root (which everything else continues to use).
+    let access = AndroidAccess { vm, activity };
+    if access.sdk() == Some(29) {
+        log::info!(
+            "android access: Android 10 enforces scoped storage for this app and the legacy opt-out is not in the manifest; the browser keeps its app-private root"
+        );
+        return None;
+    }
+    Some(access)
 }
 
 impl AndroidAccess {
@@ -63,7 +75,7 @@ impl AndroidAccess {
         // freeing it, and the attach guard scopes this thread's attachment to the call.
         let vm = unsafe { JavaVM::from_raw(self.vm) }.ok()?;
         let mut guard = vm.attach_current_thread().ok()?;
-        let out = f(&mut *guard).ok();
+        let out = f(&mut guard).ok();
         if guard.exception_check().unwrap_or(false) {
             let _ = guard.exception_clear();
         }
@@ -102,7 +114,9 @@ impl AndroidAccess {
             Some(sdk) if sdk >= 30 => {
                 self.with_env(|env| env.call_static_method("android/os/Environment", "isExternalStorageManager", "()Z", &[])?.z()).unwrap_or(false)
             }
-            // Android 9/10: the legacy runtime permission, which still unlocks the whole tree.
+            // Android 9: the legacy runtime permission, which still unlocks the whole tree there
+            // (scoped storage arrived with Android 10, whose capability is declined in
+            // `capture`).
             Some(_) => self
                 .with_env(|env| -> jni::errors::Result<bool> {
                     let perm = env.new_string("android.permission.WRITE_EXTERNAL_STORAGE")?;
@@ -116,9 +130,9 @@ impl AndroidAccess {
     }
 
     /// Ask the user to grant it: Android 11+ opens this app's "All files access" settings page,
-    /// Android 9/10 shows the runtime permission dialog (the browser re-checks the grant on
-    /// every visit, so the answer needs no callback). Best effort: a device that refuses the
-    /// intent or an unreachable JVM just leaves the grant un-granted, logged.
+    /// Android 9 shows the runtime permission dialog (the browser re-checks the grant on every
+    /// visit, so the answer needs no callback). Best effort: a device that refuses the intent or
+    /// an unreachable JVM just leaves the grant un-granted, logged.
     pub fn ask_shared_storage_grant(self) {
         let asked = match self.sdk() {
             Some(sdk) if sdk >= 30 => self.with_env(|env| -> jni::errors::Result<bool> {
@@ -137,14 +151,14 @@ impl AndroidAccess {
             }),
             Some(_) => self.with_env(|env| -> jni::errors::Result<bool> {
                 // The permission dialog: requestPermissions(new String[]{read, write}, 42).
-                let arr = env.new_object_array(2, "java/lang/String", &JObject::null())?;
+                let arr = env.new_object_array(2, "java/lang/String", JObject::null())?;
                 let perms = ["android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"];
                 for (i, perm) in perms.into_iter().enumerate() {
                     let s = env.new_string(perm)?;
                     env.set_object_array_element(&arr, i as jni::sys::jsize, &s)?;
                 }
                 let act = self.activity();
-                env.call_method(&act, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&arr), JValue::Int(42)])?;
+                env.call_method(act, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&arr), JValue::Int(42)])?;
                 Self::started(env)
             }),
             None => None,

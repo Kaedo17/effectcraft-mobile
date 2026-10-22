@@ -48,7 +48,16 @@ resources = "res"
 # the app-private directory. It is a special permission the app can never hold silently — the
 # user grants it on the system settings page the browser opens (`android_access.rs`) — so the
 # manifest entry alone changes nothing until they do.
-uses_permission = [{ name = "android.permission.MANAGE_EXTERNAL_STORAGE" }]
+uses_permission = [
+    { name = "android.permission.MANAGE_EXTERNAL_STORAGE" },
+    # The legacy storage permissions on Android 9 (the oldest this build runs on): checked and
+    # asked for over JNI (`android_access.rs`) because "All files access"'s settings page does
+    # not exist before API 30. `max_sdk_version` keeps them out of the mergeable manifest on
+    # every version that enforces scoped storage (Android 10+; Android 10 itself is declined in
+    # `capture`).
+    { name = "android.permission.READ_EXTERNAL_STORAGE", max_sdk_version = 29 },
+    { name = "android.permission.WRITE_EXTERNAL_STORAGE", max_sdk_version = 29 },
+]
 
 [package.metadata.android.sdk]
 min_sdk_version = 28
