@@ -1644,6 +1644,9 @@ impl EffectcraftApp {
         self.run_dialog_answers();
         self.auto.begin_frame();
         self.frames.set_context(&ctx);
+        // A touch screen's bars: a fingertip has to land on a scroll bar (widgets.rs), and a
+        // theme change rebuilds the styles, so the widening is re-checked every frame.
+        widgets::touch_scroll_target(&ctx);
         if self.session.render_job.is_some() {
             self.session.poll_render();
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
