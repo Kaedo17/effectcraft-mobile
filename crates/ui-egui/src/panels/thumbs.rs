@@ -15,8 +15,13 @@ pub type Thumb = Option<(egui::TextureHandle, [u32; 2])>;
 /// Thumbnail of a file (cached per path; `None` while not decoded or not decodable). Still
 /// images and video decode through the media layer's probe and footage cache, downscaled to at
 /// most 128 px on the long side.
+///
+/// The key is the path *and* the file's size and modification time, so a save over that path (or
+/// a file that appears where an undecodable one was) is decoded afresh instead of showing the
+/// old picture — or the old "no picture" — for the rest of the session.
 pub fn media(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
-    let id = egui::Id::new(("file-thumb", path));
+    let stamp = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
+    let id = egui::Id::new(("file-thumb", path, stamp));
     if let Some(t) = ctx.data(|d| d.get_temp::<Thumb>(id)) {
         return t;
     }
