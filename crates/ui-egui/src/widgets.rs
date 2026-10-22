@@ -815,6 +815,31 @@ fn menu_drag() -> egui::containers::scroll_area::DragScroll {
     egui::containers::scroll_area::DragScroll::Always
 }
 
+/// A fingertip cannot aim at a 6-point scroll bar: on a touch screen, widen the bar's whole
+/// `bar_width` (which is also the width inside which egui hit-tests the bar) to
+/// [`TOUCH_BAR_TARGET`] points.
+///
+/// The themes build `ScrollStyle::solid` with a 6-point `bar_width`; the app's own
+/// [`scroll_bar`] widens only its drawn hit. Every panel that lays out its own rows draws that
+/// one, but every `ScrollArea` (menus, the file browser, Settings' page list) hit-tests through
+/// this style value, and a finger misses the 6-point band — so on a touch screen it is widened.
+/// Because the styles are replaced outright whenever a theme is applied (`theme::apply_visuals`),
+/// widening is re-checked every frame rather than remembered once.
+pub fn touch_scroll_target(ctx: &egui::Context) {
+    if !(cfg!(target_os = "android") || ctx.input(|i| i.has_touch_screen())) {
+        return;
+    }
+    let narrower = |s: &egui::Style| s.spacing.scroll.bar_width < TOUCH_BAR_TARGET;
+    let narrow = narrower(&ctx.global_style()) || [egui::Theme::Dark, egui::Theme::Light].iter().any(|t| narrower(&ctx.style_of(*t)));
+    if !narrow {
+        return;
+    }
+    ctx.all_styles_mut(|s| s.spacing.scroll.bar_width = s.spacing.scroll.bar_width.max(TOUCH_BAR_TARGET));
+}
+
+/// The scroll bar's interaction target on a touch screen, in points.
+const TOUCH_BAR_TARGET: f32 = 24.0;
+
 /// egui's menu style with no gap between the rows: the gap the app's item spacing left between
 /// two entries highlighted neither and swallowed a click there. The rows grow by that gap, so a
 /// menu keeps its size.
@@ -1051,5 +1076,54 @@ mod tests {
         run(vec![egui::Event::PointerMoved(at)]);
         run(vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]);
         assert!(scrolled.get() > 0.0, "a press 12 points past the track centres the thumb there: {}", scrolled.get());
+    }
+
+    /// A touch screen's scroll bars: `ScrollArea` hit-tests through the style's `bar_width`
+    /// (6 points here), which a finger cannot land on, so [`touch_scroll_target`] widens it —
+    /// and keeps it widened after a theme change rebuilds the styles.
+    #[test]
+    fn a_touch_screen_widens_the_scroll_bar_target() {
+        let bar_width = |events: Vec<egui::Event>| {
+            let ctx = egui::Context::default();
+            let idle = ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width;
+            ctx.begin_pass(egui::RawInput { events, ..Default::default() });
+            super::touch_scroll_target(&ctx);
+            let width = ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width;
+            ctx.end_pass().drop_without_applying_deltas();
+            (idle, width)
+        };
+        let (idle, plain) = bar_width(Vec::new());
+        assert_eq!(plain, idle, "a window with no touch screen keeps the theme's bar");
+        let touch = egui::Event::Touch {
+            device_id: egui::TouchDeviceId(3),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::Start,
+            pos: egui::pos2(10.0, 10.0),
+            force: None,
+        };
+        let (_, wide) = bar_width(vec![touch]);
+        assert!(wide >= super::TOUCH_BAR_TARGET, "a finger has to be able to land on the bar: {wide}");
+        assert!(wide > plain, "the target only ever widens: {plain} -> {wide}");
+
+        // A theme switch replaces each style outright; the wider target has to come back.
+        let ctx = egui::Context::default();
+        let touch = egui::Event::Touch {
+            device_id: egui::TouchDeviceId(3),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::Start,
+            pos: egui::pos2(10.0, 10.0),
+            force: None,
+        };
+        ctx.begin_pass(egui::RawInput { events: vec![touch.clone()], ..Default::default() });
+        super::touch_scroll_target(&ctx);
+        assert!(ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width >= super::TOUCH_BAR_TARGET);
+        ctx.end_pass().drop_without_applying_deltas();
+        crate::theme::apply_visuals(&ctx, &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark));
+        assert!(ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width < super::TOUCH_BAR_TARGET, "the theme rebuild starts from the thin bar again");
+        ctx.begin_pass(egui::RawInput { events: vec![touch], ..Default::default() });
+        super::touch_scroll_target(&ctx);
+        let after_theme = ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width;
+        ctx.end_pass().drop_without_applying_deltas();
+        assert!(after_theme >= super::TOUCH_BAR_TARGET, "a theme switch must not take the touch target away: {after_theme}");
     }
 }
