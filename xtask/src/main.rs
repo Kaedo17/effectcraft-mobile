@@ -464,11 +464,17 @@ fn audio_backend_hint(found: bool) -> Result<(), String> {
 /// present. Checking here turns a late, confusing link error into one line naming the package.
 /// The probe reads `PKG_CONFIG` first, like the pkg-config crate alsa-sys goes through: the
 /// variable may name a working pkg-config that is not on `PATH`, and the build would use it too.
+/// A probe that could not launch is not "ALSA missing" — it reports the launch failure separately.
 #[cfg(target_os = "linux")]
 fn audio_backend() -> Result<(), String> {
     let program = std::env::var_os("PKG_CONFIG").unwrap_or_else(|| "pkg-config".into());
-    let found = Command::new(program).args(["--exists", "alsa"]).status().map(|s| s.success()).unwrap_or(false);
-    audio_backend_hint(found)
+    match Command::new(&program).args(["--exists", "alsa"]).status() {
+        Ok(status) => audio_backend_hint(status.success()),
+        Err(e) => Err(format!(
+            "The {} executable could not be run: {e}. Install pkg-config, or point PKG_CONFIG at a working one — it is the same executable alsa-sys's pkg-config dependency asks.",
+            std::path::Path::new(&program).display()
+        )),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
