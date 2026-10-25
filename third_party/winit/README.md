@@ -31,6 +31,9 @@ patch adds one method, `EventLoop::dispatch_mouse_input`, and one call to it:
   the button in the state, a release omits it, and the state of the untouched double-report
   case (a device reporting the gesture's first press as `Down` *and* `ButtonPress`) agrees
   with what is already reported, so the semantics are the same as an `action_button()` read;
+  only buttons moving in the event's direction count (a stale `reported` bit — a release the
+  `Up` or a cancellation handled elsewhere did not clear — cannot name the button that did not
+  move and swallow the one that did);
 - the button that *starts* a gesture arrives as an ordinary `Down`/`Up` (per Android's
   button-event rules): `Down` is reported as the button in the event's `button_state()` (a
   touchpad tap has none, and is the primary button), and `Up`, whose state is already cleared, as

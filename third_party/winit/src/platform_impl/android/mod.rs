@@ -199,11 +199,18 @@ fn button_in_state(motion_event: &MotionEvent<'_>) -> Option<event::MouseButton>
 /// made this library fail to load on older Android at all): the change is equally visible in
 /// the button *state* (`AMotionEvent_getButtonState`, every Android), which reflects it — a
 /// press lists the button, a release omits it — so the changed button is the one whose state
-/// disagrees with `reported`, the buttons we have already dispatched. `None` when there is
+/// disagrees with `reported`, the buttons we have already dispatched, filtered to the event's
+/// direction: a press only counts buttons the event lifts it into the state, a release only
+/// buttons it takes out, so a stale `reported` bit cannot name the button that did not move and
+/// swallow the one that did. `None` when there is
 /// nothing to change: the state matches exactly what we have reported (a first press doubled
 /// as a `ButtonPress`, or a release the `Up` handled first), and only buttons in the state
 /// beyond ours are skipped (stylus buttons, whose pointers never route here anyway).
-fn changed_button_in_state(reported: u8, motion_event: &MotionEvent<'_>) -> Option<event::MouseButton> {
+fn changed_button_in_state(
+    reported: u8,
+    pressed: bool,
+    motion_event: &MotionEvent<'_>,
+) -> Option<event::MouseButton> {
     use event::MouseButton;
     let state = motion_event.button_state();
     [
@@ -214,7 +221,12 @@ fn changed_button_in_state(reported: u8, motion_event: &MotionEvent<'_>) -> Opti
         (state.forward(), MouseButton::Forward),
     ]
     .into_iter()
-    .find(|(down, button)| *down != (reported & mouse_button_bit(*button) != 0))
+    .find(|(down, button)| {
+        // Only buttons moving in the event's direction count: after a missed release a stale
+        // `reported` bit could otherwise name the button that did not move and swallow the one
+        // that did (a second finger's press, or a release the first `Up` did not cover).
+        pressed == *down && *down != (reported & mouse_button_bit(*button) != 0)
+    })
     .map(|(_, button)| button)
 }
 
@@ -634,7 +646,7 @@ impl<T: 'static> EventLoop<T> {
                 // state already matches what we reported: nothing changed (the doubled first
                 // press, or a release an `Up` has already handled), and nothing is dispatched.
                 let Some(button) =
-                    changed_button_in_state(self.mouse_buttons.get(), motion_event)
+                    changed_button_in_state(self.mouse_buttons.get(), pressed, motion_event)
                 else {
                     return InputStatus::Handled;
                 };
