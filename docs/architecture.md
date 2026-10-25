@@ -47,7 +47,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
 | L5 | `ui-egui` | The desktop interface: docking, panels, viewer, timeline, graph editor, dialogs, control channel |
 | L5 | `automation` | The MCP server, headless or bridged to the running app |
-| L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web`, `effectcraft-android` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)); Android's NativeActivity entry trampoline (arm64 APK, in-app save/open/export/folder/import dialogs in app-private storage plus shared storage once granted, no system picker) |
+| L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web`, `effectcraft-android` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)); Android's NativeActivity entry trampoline (arm64 APK, in-app save/open/export/folder/import dialogs in app-private storage plus shared storage on Android 9 and older, where the legacy grant still opens it; an overwriting save asks Replace? first; no system picker) |
 
 Allowed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
 `media / expr / export / gpu → render`, `export → media`, `lottie → format`, `host → engine, script`,
@@ -77,9 +77,18 @@ modifier keys onto each frame's key events itself (`stamp_android_modifiers` in 
 from `raw_input_hook` after the frame's events are gathered, before egui builds its input state).
 The stamping also keeps a chord from degrading into its plain-key binding: without it a chord's
 letter arrives unmodified and fires whatever that plain key is bound to — the Zoom tool for `Z` —
-so the chord itself never runs. Touch and touch-dragged stylus input is untouched in both layers.
-The same two layers were validated first on FilmCraft's Android port (filmcraft `47f202cb`,
-`ecea29d6`, `685c9cc3`).
+so the chord itself never runs. The vendored mouse path also matches Android's scroll direction on
+the horizontal axis (the OS's `Hscroll` runs the other way round from winit's positive `x`) and
+reports a held button once, deduplicating the events of a device that repeats `Down` while held
+and also sends `ButtonPress` for the same press. Touch and touch-dragged stylus input keeps the
+untouched `Touch` path there. The app side makes the chrome reachable under a finger as well:
+panel content drags like a wheel does, the drawn scroll bar's hit area widens beyond its 6-point
+line, and the dock's resize gutters stop eating the panel scroll drag; and `touch_scroll_target`
+re-applies egui's scroll-bar width at 24 points every frame on a touch screen (or on Android), so
+a theme change that rebuilds the styles can't drop the widening
+(`a_touch_screen_widens_the_scroll_bar_target`). The same two layers were validated first on
+FilmCraft's Android port (filmcraft `47f202cb`, `ecea29d6`, `685c9cc3`), and the scroll-bar work
+on PhotoCraft's (PhotoCraft #6931).
 
 ## 2. Time
 
@@ -735,6 +744,7 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | Android: `upstream/main` merged into the arm64 port with the desktop app keeping its shared library (`apps/effectcraft/src/lib.rs`, `main.rs` a trampoline); fingers reach every scroll bar (`touch_scroll_target` re-applies the 24-point width every frame, so a theme change can't drop it); the vendored winit matches Android's horizontal scroll direction and reports a held button once; the in-app save asks Replace? before overwriting; thumbnails re-decode when a file's size or modification time changes (PR #1508) |
 | 2026-10-16 | minor | Android input: vendored winit (`third_party/winit`) with the mouse/trackpad path filled in — wheel, right/middle button, hover — and in-app keyboard-modifier stamping (`stamp_android_modifiers`), since winit's Android backend emits neither `ModifiersChanged` nor any mouse event (ported from FilmCraft's fix) |
 | 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
 
