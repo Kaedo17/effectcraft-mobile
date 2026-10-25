@@ -789,6 +789,12 @@ fn menu_drag() -> egui::containers::scroll_area::DragScroll {
 /// this style value, and a finger misses the 6-point band — so on a touch screen it is widened.
 /// Because the styles are replaced outright whenever a theme is applied (`theme::apply_visuals`),
 /// widening is re-checked every frame rather than remembered once.
+///
+/// `bar_width` is also the width a *solid* bar draws, so widening it alone drew 24-point bars
+/// everywhere a stock `ScrollArea` scrolled. The bar therefore takes egui's floating shape: it
+/// rest-draws `floating_width` as thick as the theme drew it, reserves the sliver the solid bar
+/// reserved (the layout does not reflow), and expands to `bar_width` only while the finger works
+/// it — egui senses the full `bar_width` either way, at rest and drawn thin alike.
 pub fn touch_scroll_target(ctx: &egui::Context) {
     if !(cfg!(target_os = "android") || ctx.input(|i| i.has_touch_screen())) {
         return;
@@ -798,7 +804,22 @@ pub fn touch_scroll_target(ctx: &egui::Context) {
     if !narrow {
         return;
     }
-    ctx.all_styles_mut(|s| s.spacing.scroll.bar_width = s.spacing.scroll.bar_width.max(TOUCH_BAR_TARGET));
+    ctx.all_styles_mut(|s| {
+        let sc = &mut s.spacing.scroll;
+        let resting = sc.bar_width;
+        sc.bar_width = sc.bar_width.max(TOUCH_BAR_TARGET);
+        sc.floating = true;
+        sc.floating_width = sc.floating_width.max(resting);
+        sc.floating_allocated_width = sc.floating_allocated_width.max(sc.bar_inner_margin + resting + sc.bar_outer_margin);
+        // Thin like the solid bar was while the finger is elsewhere:
+        sc.dormant_background_opacity = 1.0;
+        sc.dormant_handle_opacity = 1.0;
+        sc.active_background_opacity = 1.0;
+        sc.active_handle_opacity = 1.0;
+        // Translucent when the finger expands it over the content it scrolls.
+        sc.interact_background_opacity = 0.6;
+        sc.interact_handle_opacity = 0.6;
+    });
 }
 
 /// The scroll bar's interaction target on a touch screen, in points.
@@ -1089,5 +1110,49 @@ mod tests {
         let after_theme = ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width;
         ctx.end_pass().drop_without_applying_deltas();
         assert!(after_theme >= super::TOUCH_BAR_TARGET, "a theme switch must not take the touch target away: {after_theme}");
+    }
+
+    /// The widened target must not widen the drawn bar: egui uses `bar_width` both for the hit
+    /// test and (on a solid bar) for drawing, so the solid widening drew 24-point bars
+    /// everywhere a stock `ScrollArea` scrolled (menus, the file browser, Settings…). On a
+    /// touch screen the bar therefore takes egui's floating shape: it rest-draws
+    /// `floating_width` as thick as the theme drew it, reserves the sliver the solid bar
+    /// reserved, and expands to `bar_width` only while the finger works it (a hover too).
+    #[test]
+    fn a_touch_screen_draws_the_scroll_bar_thin_between_touches() {
+        let touch = egui::Event::Touch {
+            device_id: egui::TouchDeviceId(3),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::Start,
+            pos: egui::pos2(10.0, 10.0),
+            force: None,
+        };
+        let ctx = egui::Context::default();
+        let before = ctx.style_of(egui::Theme::Dark).spacing.scroll;
+        ctx.begin_pass(egui::RawInput { events: vec![touch], ..Default::default() });
+        super::touch_scroll_target(&ctx);
+        let after = ctx.style_of(egui::Theme::Dark).spacing.scroll;
+        ctx.end_pass().drop_without_applying_deltas();
+
+        assert!(after.floating, "the bar takes egui's floating (rest-thin) shape");
+        assert_eq!(after.floating_width, before.bar_width, "the bar rests as thick as the theme drew it: {}", before.bar_width);
+        assert_eq!(
+            after.floating_allocated_width,
+            before.bar_inner_margin + before.bar_width + before.bar_outer_margin,
+            "the layout keeps the sliver the solid bar reserved, so content does not reflow"
+        );
+        assert_eq!(after.dormant_background_opacity, 1.0, "the resting bar is as visible as the solid one was");
+        assert_eq!(after.dormant_handle_opacity, 1.0);
+        assert!(after.interact_handle_opacity < 1.0, "the expanded bar is translucent over the content while the finger drags");
+
+        // No touch screen: every field untouched (the floating branch is touch-only).
+        let ctx = egui::Context::default();
+        let before = ctx.style_of(egui::Theme::Dark).spacing.scroll;
+        ctx.begin_pass(Default::default());
+        super::touch_scroll_target(&ctx);
+        let after = ctx.style_of(egui::Theme::Dark).spacing.scroll;
+        ctx.end_pass().drop_without_applying_deltas();
+        assert_eq!(after.floating, before.floating);
+        assert_eq!(after.bar_width, before.bar_width);
     }
 }
