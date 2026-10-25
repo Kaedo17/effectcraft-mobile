@@ -33,22 +33,24 @@ pub fn media(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut
     let stamp = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
     let id = egui::Id::new(("file-thumb", path));
     let saved: Option<ThumbEntry> = ctx.data(|d| d.get_temp::<Option<ThumbEntry>>(id)).unwrap_or(None);
-    if let Some(saved) = saved {
-        if saved.thumb.is_some() && saved.stamp != stamp {
-            // The file changed since its last decode: the media layer forgets what it decoded
-            // from the old file, whose decoders and frames are keyed by the path (see
-            // `forget`), or the fresh probe would re-cache the old file's pixels.
-            app.session.footage.forget(path);
-        }
-        if saved.stamp == stamp {
-            // The same file as the saved answer (decodable or not): no work.
-            return saved.thumb.clone();
-        }
+    if let Some(saved) = saved
+        && saved.stamp == stamp
+    {
+        // The same file as the saved answer (decodable or not): no work. A failed decode
+        // is a saved answer too — the media pool keeps *why* it failed, and re-probing
+        // per frame would only repeat it.
+        return saved.thumb.clone();
     }
     if *budget == 0 {
         return None;
     }
     *budget -= 1;
+    // The decode below re-reads the file as it is now, so the media layer forgets what it has
+    // for the path — its decoders and frames are keyed by the path alone (see
+    // [`forget`](effectcraft_media::MediaPool::forget)), and so are the recorded problems, so
+    // a file that completes (or appears) where an undecodable one was gets a fresh retry —
+    // whatever the last answer on this path was.
+    app.session.footage.forget(path);
     let thumb = (|| {
         let imp = app.session.importer.clone()?;
         let f = imp.probe(path).ok()?;
