@@ -47,9 +47,9 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
 | L5 | `ui-egui` | The desktop interface: docking, panels, viewer, timeline, graph editor, dialogs, control channel |
 | L5 | `automation` | The MCP server, headless or bridged to the running app |
-urs
 | L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)) |
-ed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
+
+Allowed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
 `media / expr / export / gpu → render`, `export → media`, `lottie → format`, `host → engine, script`,
 `script → engine`.
 
@@ -66,7 +66,7 @@ focused control into view. Active composition breadcrumbs use the selected-row t
 The `viewer_geometry` tests inspect actual painted contrast, scroll geometry and pointer/keyboard
 reachability across the three themes.
 
-wo layers make a physical keyboard and mouse usable on Android. winit 0.30.13 (the last 0.30
+Two layers make a physical keyboard and mouse usable on Android. winit 0.30.13 (the last 0.30
 release, pinned by eframe 0.36) reports no modifier state there — it ignores the meta state the OS
 carries on every key event and never emits the `ModifiersChanged` egui-winit learns `Ctrl`/`Shift`/
 `Alt` from — and drops every motion action that is not a touch, so a mouse has no hover, no wheel
@@ -90,7 +90,7 @@ a theme change that rebuilds the styles can't drop the widening
 FilmCraft's Android port (filmcraft `47f202cb`, `ecea29d6`, `685c9cc3`), and the scroll-bar work
 on PhotoCraft's (PhotoCraft #6931).
 
-Time
+## 2. Time
 
 All time is an integer `Tick`, 254 016 000 000 per second, the least common multiple of every
 broadcast frame rate (×1001) and audio sample rate, so frame and sample positions are exact.
@@ -744,7 +744,6 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 
 | Date | Change | Summary |
 |---|---|---|
-urs
--10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
+| 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
 
 PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.
