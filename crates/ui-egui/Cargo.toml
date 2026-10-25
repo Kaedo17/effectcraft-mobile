@@ -23,7 +23,7 @@ effectcraft-render = { workspace = true }
 effectcraft-engine = { workspace = true }
 effectcraft-gpu = { workspace = true }
 egui = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
+eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -38,6 +38,17 @@ image = { workspace = true }
 craft-ui = { workspace = true, features = ["native-windows"] }
 craft-update = { workspace = true }
 sys-locale = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Screen-reader and clipboard support on desktop. eframe only offers `accesskit`
+# with `android-game-activity`, so Android builds (NativeActivity) go without it.
+eframe = { workspace = true, features = ["accesskit", "clipboard"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# eframe's Android backend (NativeActivity via winit). Without it android-activity
+# builds with no backend and fails to compile; the headless CLI reaches eframe
+# through this crate.
+eframe = { workspace = true, features = ["android-native-activity"] }
 
 [dev-dependencies]
 # Fonts for kittest: the workspace `egui` features are what test roots resolve, but stating them
