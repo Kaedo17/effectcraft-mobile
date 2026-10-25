@@ -1,4 +1,4 @@
-use super::choices::{APPEARANCE_MODES, DARK_THEMES, LANGUAGES, LIGHT_THEMES, THEMES, WINDOW_GRAPHICS, choices, is_choice, theme_family};
+use super::choices::{APPEARANCE_MODES, DARK_THEMES, LANGUAGES, LIGHT_THEMES, PICKER_VIEWS, THEMES, WINDOW_GRAPHICS, choices, is_choice, theme_family};
 use super::recent::{MAX_EFFECTS_FAVORITES, MAX_RECENT_SCRIPTS};
 use super::sections::{CompPreset, default_labels, parse_hex};
 use super::{Appearance, General, Map, PREFS_VERSION, Prefs, Startup, Value, json};
@@ -99,6 +99,9 @@ impl Prefs {
         }
         let g = &mut self.general;
         if !is_choice(LANGUAGES, &g.language) {
+        if !is_choice(PICKER_VIEWS, &g.picker_view) {
+            g.picker_view = General::default().picker_view;
+        }
             g.language = General::default().language;
         }
         g.undo_levels = g.undo_levels.clamp(1, 99);

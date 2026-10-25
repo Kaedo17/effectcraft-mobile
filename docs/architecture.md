@@ -47,9 +47,9 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
 | L5 | `ui-egui` | The desktop interface: docking, panels, viewer, timeline, graph editor, dialogs, control channel |
 | L5 | `automation` | The MCP server, headless or bridged to the running app |
-urs
-| L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)) |
-ed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
+| L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web`, `effectcraft-android` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)); Android's NativeActivity entry trampoline (arm64 APK, in-app save/open/export/folder/import dialogs in app-private storage plus shared storage once its access is granted — "All files access" from Android 11, the legacy grant on Android 9 (Android 10 stays app-private: scoped storage applies and the legacy opt-out isn't in the manifest); an overwriting save asks Replace? first; no system picker) |
+
+Allowed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
 `media / expr / export / gpu → render`, `export → media`, `lottie → format`, `host → engine, script`,
 `script → engine`.
 
@@ -66,7 +66,7 @@ focused control into view. Active composition breadcrumbs use the selected-row t
 The `viewer_geometry` tests inspect actual painted contrast, scroll geometry and pointer/keyboard
 reachability across the three themes.
 
-wo layers make a physical keyboard and mouse usable on Android. winit 0.30.13 (the last 0.30
+Two layers make a physical keyboard and mouse usable on Android. winit 0.30.13 (the last 0.30
 release, pinned by eframe 0.36) reports no modifier state there — it ignores the meta state the OS
 carries on every key event and never emits the `ModifiersChanged` egui-winit learns `Ctrl`/`Shift`/
 `Alt` from — and drops every motion action that is not a touch, so a mouse has no hover, no wheel
@@ -90,7 +90,7 @@ a theme change that rebuilds the styles can't drop the widening
 FilmCraft's Android port (filmcraft `47f202cb`, `ecea29d6`, `685c9cc3`), and the scroll-bar work
 on PhotoCraft's (PhotoCraft #6931).
 
-Time
+## 2. Time
 
 All time is an integer `Tick`, 254 016 000 000 per second, the least common multiple of every
 broadcast frame rate (×1001) and audio sample rate, so frame and sample positions are exact.
@@ -744,7 +744,8 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 
 | Date | Change | Summary |
 |---|---|---|
-urs
--10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
+| 2026-10-25 | minor | Android: `upstream/main` merged into the arm64 port with the desktop app keeping its shared library (`apps/effectcraft/src/lib.rs`, `main.rs` a trampoline); fingers reach every scroll bar (`touch_scroll_target` re-applies the 24-point width every frame, so a theme change can't drop it); the vendored winit matches Android's horizontal scroll direction and reports a held button once; the in-app save asks Replace? before overwriting; thumbnails re-decode when a file's size or modification time changes (PR #1508) |
+| 2026-10-16 | minor | Android input: vendored winit (`third_party/winit`) with the mouse/trackpad path filled in — wheel, right/middle button, hover — and in-app keyboard-modifier stamping (`stamp_android_modifiers`), since winit's Android backend emits neither `ModifiersChanged` nor any mouse event (ported from FilmCraft's fix) |
+| 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
 
 PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.

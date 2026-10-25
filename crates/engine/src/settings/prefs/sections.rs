@@ -26,6 +26,9 @@ page!(General {
     /// Interface language: `system` (the operating system's, where EffectCraft has it, else
     /// English), or a language code from `LANGUAGES`.
     language: String = "system".into(),
+    /// The in-app file picker's view: one of `PICKER_VIEWS` (`list`, `small`, `medium`,
+    /// `large` icons), changed with the picker's own view buttons and remembered.
+    picker_view: String = "large".into(),
     /// Levels of Undo (1–99).
     undo_levels: u32 = 32,
     /// Path Point and Handle Size (px).

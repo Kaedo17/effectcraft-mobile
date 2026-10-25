@@ -1,3 +1,6 @@
+/// The in-app file picker's view: (label, `general.pickerView` value).
+pub const PICKER_VIEWS: &[(&str, &str)] = &[("List", "list"), ("Small", "small"), ("Medium", "medium"), ("Large", "large")];
+
 /// Settings ▸ General ▸ Language: (label, `general.language` value).
 pub const LANGUAGES: &[(&str, &str)] = &[
     ("Match System", "system"),
