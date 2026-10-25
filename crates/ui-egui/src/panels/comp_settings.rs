@@ -198,7 +198,9 @@ pub fn choose_name(
 ) {
     let Some(mut name) = d.preset_name.take() else { return };
     let mut keep = true;
-    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(ui.available_width()));
+    // A few points narrower than the container (see the Save-dialog fix in `android_file`): an
+    // exactly-full-width field can round a hair wide at fractional pixels-per-point and overflow.
+    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(ui.available_width() - 4.0));
     auto.add("dialog.comp.presetName", r.rect, "Preset Name");
     if ui.data_mut(|m| m.remove_temp::<bool>(name_focus_id())).unwrap_or(false) {
         r.request_focus();

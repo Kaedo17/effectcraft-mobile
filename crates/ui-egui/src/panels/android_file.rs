@@ -535,7 +535,13 @@ pub fn show(app: &mut crate::EffectcraftApp, ctx: &egui::Context, t: &crate::the
                     change = true;
                 }
                 ui.add_space(8.0);
-                ui.add(egui::TextEdit::singleline(&mut name).hint_text(&fallback).desired_width(f32::INFINITY));
+                // egui rounds widget sizes up to the device-pixel grid, so at fractional
+                // pixels-per-point an exactly-full-width field can land a hair wider than the
+                // scroll area's container; that overflow turns on the "when needed" horizontal
+                // scrollbar, whose full-thickness interactive strip then overlaps the
+                // Save/Cancel row and steals those taps (see the tap regression test in
+                // `dialogs.rs`). Keep the field a few points narrower than the container.
+                ui.add(egui::TextEdit::singleline(&mut name).hint_text(&fallback).desired_width(ui.available_width() - 4.0));
                 ui.add_space(8.0);
                 if let Some(pending) = &asking {
                     let shown = pending.file_name().and_then(|n| n.to_str()).unwrap_or_default();

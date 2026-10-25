@@ -92,7 +92,9 @@ fn body(app: &mut EffectcraftApp, ui: &mut egui::Ui) -> (Actions, Actions) {
     let shown_name = if eg.name.is_empty() { comp_name.clone() } else { eg.name.clone() };
     let name_id = egui::Id::new("eg-name-buf");
     let mut name: String = ctx.data(|d| d.get_temp(name_id)).unwrap_or_else(|| shown_name.clone());
-    let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text(tr("Template name")).desired_width(f32::INFINITY));
+    // A few points narrower than the container (see the Save-dialog fix in `android_file`): an
+    // exactly-full-width field can round a hair wide at fractional pixels-per-point and overflow.
+    let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text(tr("Template name")).desired_width(ui.available_width() - 4.0));
     app.auto.add("essential.name", r.rect, &shown_name);
     if r.has_focus() {
         ctx.data_mut(|d| d.insert_temp(name_id, name.clone()));

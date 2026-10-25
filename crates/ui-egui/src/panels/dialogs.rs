@@ -172,20 +172,53 @@ pub(crate) fn modal_space(ctx: &egui::Context) -> egui::Vec2 {
     (ctx.content_rect().size() - vec2(48.0, 48.0)).max(vec2(120.0, 80.0))
 }
 
-pub(crate) fn modal(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, body: impl FnOnce(&mut egui::Ui)) {
-    modal_with_scroll(ctx, title, size, t, false, body);
+/// Modal chrome for a dialog whose body scrolls vertically only: content is laid out to fit
+/// its width, and an overflow that turns on egui's "when needed" *horizontal* scrollbar
+/// registers an invisible full-thickness interactive strip across the bottom of the content —
+/// over the button row — whose hit-test wins all ties there (the Android Save-dialog freeze;
+/// see the `modal_tap_repro` regression tests, which drive this function so the scroll
+/// decision cannot silently regress). Vertical scrolling is kept for long dialogs, and a
+/// genuinely too-wide row (a very long file name in a browser dialog) clips at the edge
+/// rather than scrolling sideways. A body that insists on sideways scroll opts out by drawing
+/// its own `ScrollArea::both()` — the layer style editor and the About credits tabs — and so
+/// takes the strip over its own bottom row, under which no button row sits. Returns the
+/// scroll area's response (`None` if the modal did not show a scroll area this frame), for
+/// tests and callers that want the geometry.
+pub(crate) fn modal(
+    ctx: &egui::Context,
+    title: &str,
+    size: egui::Vec2,
+    t: &Tokens,
+    body: impl FnOnce(&mut egui::Ui),
+) -> Option<egui::containers::scroll_area::ScrollAreaOutput<()>> {
+    modal_with_scroll(ctx, title, size, t, body)
 }
 
-pub(crate) fn modal_vertical(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, body: impl FnOnce(&mut egui::Ui)) {
-    modal_with_scroll(ctx, title, size, t, true, body);
+/// Older alias of [`modal`], kept for existing callers; dialogs never scroll sideways.
+pub(crate) fn modal_vertical(
+    ctx: &egui::Context,
+    title: &str,
+    size: egui::Vec2,
+    t: &Tokens,
+    body: impl FnOnce(&mut egui::Ui),
+) -> Option<egui::containers::scroll_area::ScrollAreaOutput<()>> {
+    modal_with_scroll(ctx, title, size, t, body)
 }
 
-fn modal_with_scroll(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, vertical_only: bool, body: impl FnOnce(&mut egui::Ui)) {
+fn modal_with_scroll(
+    ctx: &egui::Context,
+    title: &str,
+    size: egui::Vec2,
+    t: &Tokens,
+    body: impl FnOnce(&mut egui::Ui),
+) -> Option<egui::containers::scroll_area::ScrollAreaOutput<()>> {
     let max_height = (modal_space(ctx).y - 84.0).max(40.0);
+    let mut scroll = None;
     modal_fit(ctx, title, size, t, |ui, _| {
-        let scroll = if vertical_only { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
-        scroll.max_height(max_height).auto_shrink([false, true]).show(ui, body);
+        let area = egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, body);
+        scroll = Some(area);
     });
+    scroll
 }
 
 /// [`modal`] without its scroll area, for a dialog that keeps its buttons in view and scrolls
@@ -636,7 +669,11 @@ fn palette(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         .take(14)
         .collect();
     modal(ctx, "Command Palette", vec2(560.0, 470.0), t, |ui| {
-        let r = ui.add(egui::TextEdit::singleline(&mut q).hint_text(tr("Type a command or effect…")).desired_width(f32::INFINITY).font(Tokens::ui(14.0)));
+        // Like the Save dialog (see `android_file.rs`), keep this a few points narrower than the
+        // container: an exactly-full-width field rounds a hair wide at fractional ppp, spilling over.
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut q).hint_text(tr("Type a command or effect…")).desired_width(ui.available_width() - 4.0).font(Tokens::ui(14.0)),
+        );
         // Take the keyboard when the palette opens (and if anything else takes it away), but not
         // while the field already has it: egui's `request_focus` interrupts the IME composition,
         // and asking on every frame cancelled the pinyin being typed, so no Chinese could be
@@ -954,5 +991,283 @@ mod tests {
         open_new_comp(&mut app);
         let n = &app.dialog_state.comp;
         assert_eq!((n.width, n.height, n.fps, n.name.as_str()), (1000, 500, 18.0, "Comp 3"));
+    }
+}
+
+/// Regression tests for the Android Save-dialog tap freeze: buttons inside an egui `Modal`
+/// must receive a tap, and the dialog's scroll content must never overflow its container so
+/// no "when needed" horizontal scrollbar — whose invisible full-thickness strip overlaps the
+/// button row and steals those taps (egui's tie-break favours the topmost widget) — can
+/// appear. They replicate the event shape the tablet produces (`Touch` + synthetic pointer
+/// button + `PointerGone`, plus the per-frame modifier stamp) and drive the production
+/// dialog entries (`modal_fit` for the keep-buttons pages, `modal_with_scroll` for the
+/// wrapped modals), so the vertical-only scroll decision itself is under test.
+#[cfg(test)]
+mod modal_tap_repro {
+    use egui::{Event, Modifiers, PointerButton, RawInput, TouchDeviceId, TouchId, TouchPhase, vec2};
+
+    fn canvas() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1666.7, 1000.0))
+    }
+
+    #[derive(Default)]
+    struct Probe {
+        cancel_clicked: bool,
+        cancel_rect: Option<egui::Rect>,
+        layout: Vec<(&'static str, egui::Rect)>,
+        scroll_content: Option<egui::Vec2>,
+        scroll_inner: Option<egui::Rect>,
+        scroll_id: Option<egui::Id>,
+    }
+
+    /// The Save dialog body as `android_file` draws it: `Change…`, then optionally the name
+    /// field a few points narrower than the container, then the Save/Cancel row capturing the
+    /// response that matches it.
+    fn save_body(ui: &mut egui::Ui, probe: &mut Probe, textedit: bool, wide: bool, tall: bool) {
+        let location = ui.label("Location: /data/user/0/ai.storyteller.effectcraft/files/Projects");
+        probe.layout.push(("location", location.rect));
+        let change = ui.button("Change…");
+        probe.layout.push(("change", change.rect));
+        ui.add_space(8.0);
+        if wide {
+            // A forced overflow: wrapping would break even an unbreakable word to fit, so the
+            // line widens beyond its Ui like a hint or long path could in any locale.
+            ui.add(egui::Label::new("00000000000000000000000000000000000000000000000000000000000000").wrap_mode(egui::TextWrapMode::Extend));
+        }
+        ui.add_space(8.0);
+        if textedit {
+            let mut name = "Untitled Project.ecproj".to_string();
+            // egui rounds widget sizes up to the device-pixel grid; at fractional pixels-per-point
+            // (eg. 1.2) a full-width field can land a hair wider than the container, which turns on
+            // the scroll area's horizontal bar whose strip then overlaps the Save/Cancel row. Keep
+            // the field a few points narrower so rounding can never resurrect that overflow.
+            let field = ui.add(egui::TextEdit::singleline(&mut name).hint_text("Untitled.ecproj").desired_width(ui.available_width() - 4.0));
+            probe.layout.push(("name", field.rect));
+            ui.add_space(8.0);
+        }
+        ui.horizontal(|ui| {
+            let save = ui.button("Save");
+            probe.layout.push(("save", save.rect));
+            let cancel = ui.button("Cancel");
+            probe.layout.push(("cancel", cancel.rect));
+            probe.cancel_rect = Some(cancel.rect);
+            if cancel.clicked() {
+                probe.cancel_clicked = true;
+            }
+        });
+        if tall {
+            // A long dialog: the vertical bar must show and still keep the button taps safe —
+            // the filler sits *below* the row so the buttons stay in view.
+            ui.add_space(8.0);
+            for i in 0..60 {
+                ui.label(format!("row {i} of a long dialog"));
+            }
+        }
+    }
+
+    /// The real dialog wrappers: `modal_with_scroll` as every wrapped modal shows it (so the
+    /// vertical-only scroll decision is driven by production code — reverting it to a sideways
+    /// scroll fails the strip test below), and `modal_fit` for the pages that keep their button
+    /// rows in view without a wrapper scroll area.
+    fn draw_dialog(ui: &mut egui::Ui, plain: bool, tall: bool, textedit: bool, wide: bool, probe: &mut Probe) {
+        let toks = crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark);
+        let mut body = |ui: &mut egui::Ui| save_body(ui, probe, textedit, wide, tall);
+        if plain {
+            super::modal_fit(ui.ctx(), "Save Project", vec2(440.0, 240.0), &toks, |ui, _| body(ui));
+            return;
+        }
+        let Some(area) = super::modal_with_scroll(ui.ctx(), "Save Project", vec2(440.0, 240.0), &toks, body) else { return };
+        probe.scroll_content = Some(area.content_size);
+        probe.scroll_inner = Some(area.inner_rect);
+        probe.scroll_id = Some(area.id);
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Shape {
+        /// Android: `Touch` events plus the synthetic pointer button from egui-winit.
+        Touch,
+        /// Desktop mouse: plain pointer button events only.
+        Pointer,
+    }
+
+    fn tap_events(shape: Shape, p: egui::Pos2, down: bool) -> Vec<Event> {
+        let touch = |phase, pos| Event::Touch { device_id: TouchDeviceId(0), id: TouchId(0), phase, pos, force: None };
+        match (shape, down) {
+            (Shape::Touch, true) => vec![
+                touch(TouchPhase::Start, p),
+                Event::PointerMoved(p),
+                Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                Event::ModifiersChanged(Modifiers::NONE),
+            ],
+            (Shape::Touch, false) => vec![
+                touch(TouchPhase::End, p),
+                Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+                Event::PointerGone,
+                Event::ModifiersChanged(Modifiers::NONE),
+            ],
+            (Shape::Pointer, true) => vec![
+                Event::PointerMoved(p),
+                Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                Event::ModifiersChanged(Modifiers::NONE),
+            ],
+            (Shape::Pointer, false) => vec![
+                Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+                Event::PointerGone,
+                Event::ModifiersChanged(Modifiers::NONE),
+            ],
+        }
+    }
+
+    struct Rig {
+        ctx: egui::Context,
+        t: f64,
+        plain: bool,
+        tall: bool,
+        textedit: bool,
+        wide: bool,
+        probe: Probe,
+    }
+
+    impl Rig {
+        fn new(plain: bool, tall: bool, textedit: bool) -> Self {
+            Self::new_wide(plain, tall, textedit, false)
+        }
+
+        fn new_wide(plain: bool, tall: bool, textedit: bool, wide: bool) -> Self {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx, &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark), "en");
+            Self { ctx, t: 0.0, plain, tall, textedit, wide, probe: Probe::default() }
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            let plain = self.plain;
+            let tall = self.tall;
+            let textedit = self.textedit;
+            let wide = self.wide;
+            let probe = &mut self.probe;
+            self.t += 1.0 / 60.0;
+            let raw = RawInput { screen_rect: Some(canvas()), time: Some(self.t), focused: true, events, ..Default::default() };
+            let mut out = self.ctx.run_ui(raw, |ui| draw_dialog(ui, plain, tall, textedit, wide, probe));
+            out.textures_delta.clear();
+        }
+
+        /// Idle frames until the dialog has drawn, then the Cancel button's center.
+        fn ready(&mut self) -> egui::Pos2 {
+            for _ in 0..4 {
+                self.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+            }
+            self.probe.cancel_rect.expect("the dialog drew its Cancel button").center()
+        }
+
+        fn tap_with(&mut self, shape: Shape, p: egui::Pos2) {
+            self.frame(tap_events(shape, p, true));
+            self.frame(tap_events(shape, p, false));
+            for _ in 0..2 {
+                self.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+            }
+        }
+    }
+
+    /// A plain modal (a `modal_fit` page keeping its buttons in view) must accept the tap.
+    #[test]
+    fn touch_tap_clicks_a_button_in_a_plain_modal() {
+        let mut rig = Rig::new(true, false, true);
+        let p = rig.ready();
+        rig.tap_with(Shape::Touch, p);
+        assert!(rig.probe.cancel_clicked, "touch tap at {p:?} on Cancel {:?} must click it", rig.probe.cancel_rect);
+    }
+
+    #[test]
+    fn touch_tap_clicks_a_button_in_the_scrollable_android_file_modal() {
+        let mut rig = Rig::new(false, false, true);
+        let p = rig.ready();
+        rig.tap_with(Shape::Touch, p);
+        assert!(rig.probe.cancel_clicked, "touch tap at {p:?} on Cancel {:?} must click it", rig.probe.cancel_rect);
+    }
+
+    #[test]
+    fn pointer_tap_clicks_a_button_in_the_scrollable_android_file_modal() {
+        let mut rig = Rig::new(false, false, true);
+        let p = rig.ready();
+        rig.tap_with(Shape::Pointer, p);
+        assert!(rig.probe.cancel_clicked, "pointer tap at {p:?} on Cancel {:?} must click it", rig.probe.cancel_rect);
+    }
+
+    #[test]
+    fn touch_tap_clicks_account_for_pixels_per_point_one_point_two() {
+        let mut rig = Rig::new(false, false, true);
+        rig.ctx.set_pixels_per_point(1.2);
+        let p = rig.ready();
+        rig.tap_with(Shape::Touch, p);
+        assert!(rig.probe.cancel_clicked, "touch tap at {p:?} on Cancel {:?} at ppp=1.2 must click it", rig.probe.cancel_rect);
+    }
+
+    /// The Save dialog's scroll content must never overflow its container: even a hair of
+    /// overflow turns on egui's "when needed" horizontal scrollbar, whose full-thickness
+    /// interactive strip then lies over the bottom of the Save/Cancel row and steals those
+    /// taps (egui hit-tests ties to the topmost widget, which is the scrollbar strip).
+    #[test]
+    fn save_dialog_scroll_content_never_overflows_its_container() {
+        for ppp in [1.0, 1.2] {
+            let mut rig = Rig::new(false, false, true);
+            rig.ctx.set_pixels_per_point(ppp);
+            rig.ready();
+            let content = rig.probe.scroll_content.expect("the scrollable dialog ran");
+            let inner = rig.probe.scroll_inner.expect("the scrollable dialog ran");
+            let overflow = content.x - inner.width();
+            assert!(
+                overflow <= 0.01,
+                "at pixels-per-point {ppp} content {:?} overflows the container {} by {overflow} pt; widgets {:?}",
+                content,
+                inner.width(),
+                rig.probe.layout
+            );
+        }
+    }
+
+    /// Even when content genuinely overflows horizontally (a hint or a long path can produce a
+    /// word wider than the container), our dialogs must never show the "when needed" *horizontal*
+    /// scrollbar: egui registers its invisible full-thickness interactive strip over the bottom of
+    /// the content, right across the Save/Cancel row, and its hit-test resolves ties to the
+    /// topmost widget — the strip — so the taps never reach the buttons. The vertical bar stays
+    /// for content taller than the view: asserted present exactly when needed, in both shapes.
+    #[test]
+    fn overflowing_dialog_never_registers_a_horizontal_scrollbar_strip() {
+        for tall in [false, true] {
+            let mut rig = Rig::new_wide(false, tall, true, true);
+            rig.ready();
+            let scroll_id = rig.probe.scroll_id.expect("the scrollable dialog ran");
+            // Axis 0 is the horizontal bar strip; the vertical bar must stay (it is the touch
+            // affordance for long lists).
+            let strip = rig.ctx.read_response(scroll_id.with(0));
+            let (content, inner) = (rig.probe.scroll_content.expect("the scrollable dialog ran"), rig.probe.scroll_inner.expect("the scrollable dialog ran"));
+            let bar = rig.ctx.read_response(scroll_id.with(1));
+            assert!(strip.is_none(), "no horizontal scrollbar strip may be interactive, got {:?}", strip.map(|r| r.rect));
+            assert_eq!(
+                bar.is_some(),
+                content.y > inner.height(),
+                "vertical bar must show exactly for taller-than-view content (tall={tall}, content {:?}, view {})",
+                content,
+                inner.height()
+            );
+        }
+    }
+
+    /// Behavioral complement to the strip test above: even in an overflowing dialog (which, on
+    /// the broken path, would register the strip over the button row), a tap on the lower edge
+    /// of Cancel must click the button. This test does not itself discriminate on strip presence
+    /// (the geometry here doesn't reproduce the strip-overlaps-button condition), but it proves
+    /// the expected user-facing outcome — button taps work — which the strip test's
+    /// `read_response` assertion mechanically guarantees.
+    #[test]
+    fn touch_tap_on_the_bottom_edge_of_cancel_clicks_cancel_even_when_the_dialog_overflows() {
+        let mut rig = Rig::new_wide(false, false, true, true);
+        rig.ready();
+        let rect = rig.probe.cancel_rect.expect("the dialog drew its Cancel button");
+        // The strip's zone starts 14 pt above the content bottom (its bar is drawn 4 pt inside
+        // the edge and 10 pt thick): a tap 5 pt above the button's bottom edge lands in both.
+        let p = egui::pos2(rect.center().x, rect.max.y - 5.0);
+        rig.tap_with(Shape::Touch, p);
+        assert!(rig.probe.cancel_clicked, "touch tap at {p:?} on Cancel {:?} must click it", rect);
     }
 }
