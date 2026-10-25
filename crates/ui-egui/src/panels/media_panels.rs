@@ -12,7 +12,6 @@
 
 use crate::i18n::tr;
 use effectcraft_engine::media_browser as mb;
-use effectcraft_engine::project::ItemId;
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -24,9 +23,10 @@ use crate::{EffectcraftApp, widgets};
 
 // ---------------------------------------------------------------- Media Browser
 
-type Thumb = Option<(egui::TextureHandle, [u32; 2])>;
+/// The Media Browser's folder listing, shared per frame (the listing is minuted in a temp).
 type Listing = (f64, Arc<Result<Vec<mb::Entry>, String>>);
 
+<<<<<<< HEAD
 /// Thumbnail of a file (cached per path; `None` while not decoded or not decodable).
 fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
     let id = egui::Id::unique(("mb-thumb", path));
@@ -90,6 +90,8 @@ fn places_column(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
 /// drag out as [`DragPayload::Files`] and a context menu copies paths, imports (optionally into the
 /// comp) or adds a favourite. The listing is cached per folder and filter for a second, and every
 /// change runs a `mediaBrowser.*` command.
+=======
+>>>>>>> 10410ff0 (android: the in-app file browser, shared storage and the picker view sizes)
 pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
@@ -192,7 +194,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         lp.rect_filled(thumb, 3.0, Color32::from_rgb(0x18, 0x18, 0x18));
         let kind = if e.is_dir { "Folder" } else { e.kind.unwrap_or("File") };
         match (e.is_dir, e.kind) {
-            (false, Some("image" | "video")) => match thumbnail(app, &ctx, &e.path, &mut budget) {
+            (false, Some("image" | "video")) => match super::thumbs::media(app, &ctx, &e.path, &mut budget) {
                 Some((tex, [w, h])) => {
                     let s = (thumb.width() / w as f32).min(thumb.height() / h as f32);
                     lp.image(

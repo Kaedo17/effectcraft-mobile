@@ -144,9 +144,15 @@ pub enum Dialog {
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).
     DeleteTemplate,
+    /// Android's in-app Save / Open Project prompt (`panels::android_file`): no system
+    /// picker exists there, so the app-private storage directory answers instead. Served on
+    /// any host that sets [`Hooks::app_files_dir`] (the commands' file dialogs then need no
+    /// blocking picker), so the dialog compiles and is tested on every platform.
+    AndroidFile,
 }
 
 /// A non-blocking file dialog's answer for the command that asked (`menus::dialog_answered`).
+#[derive(Clone, Debug)]
 pub(crate) struct DialogAnswer {
     pub command: String,
     pub key: &'static str,
@@ -154,6 +160,77 @@ pub(crate) struct DialogAnswer {
     pub paths: Vec<String>,
 }
 
+<<<<<<< HEAD
+=======
+/// Host hooks provided by the native app (file pickers etc.).
+#[derive(Default)]
+pub struct Hooks {
+    /// The system appearance for Settings ▸ Appearance ▸ Sync with System (the desktop app reads
+    /// the Linux desktop portal); without it, what egui reports.
+    pub system_theme: Option<SystemThemeFn>,
+    pub pick_files: Option<Box<dyn Fn(&[&str]) -> Vec<String>>>,
+    pub pick_save: Option<Box<dyn Fn(&str) -> Option<String>>>,
+    pub pick_open_project: Option<Box<dyn Fn() -> Option<String>>>,
+    /// Opens the audio output for preview playback (the desktop app uses cpal).
+    pub audio_device: Option<audio::AudioDeviceFactory>,
+    /// Lists audio output devices (Settings ▸ Audio).
+    pub audio_devices: Option<Box<dyn Fn() -> Vec<String>>>,
+    /// Picks a folder (Settings paths).
+    pub pick_folder: Option<Box<dyn Fn() -> Option<String>>>,
+    /// Save dialog for other file kinds: (default name or path, extension; empty: no filter). A
+    /// default path opens the dialog in its folder.
+    pub pick_save_file: Option<Box<dyn Fn(&str, &str) -> Option<String>>>,
+    /// The system clipboard's text (native menu Edit ▸ Paste into a text field).
+    pub clipboard_text: Option<Box<dyn Fn() -> Option<String>>>,
+    /// Application actions the OS performs (`app.hide`, `app.hideOthers`, `app.showAll` on
+    /// macOS). Returns false when the host doesn't handle the id.
+    pub app_action: Option<Box<dyn Fn(&str) -> bool>>,
+    /// Shows a command's file dialog without blocking the frame and calls `done` with the
+    /// answer (the host then asks for a repaint). Used in place of the blocking pickers above for
+    /// the commands' dialogs (File ▸ Import, Open, Save As…) where blocking the frame is unsafe or
+    /// leaves the window unresponsive: on macOS a nested modal event loop there aborted the app on
+    /// a drag over the window (#511), and on Linux a blocking desktop-portal dialog never pumps
+    /// events, so the compositor marks the window as not responding (#1275).
+    pub file_dialog_async: Option<Box<dyn Fn(FileDialog, DialogDone)>>,
+    /// The app-private storage directory a host serves the in-app Save / Open Project prompts
+    /// from (`AndroidApp::internal_data_path` on Android), where the in-app prompts read and
+    /// write. `None` elsewhere (or when it could not be resolved): the commands fall through
+    /// to the blocking pickers, or fail with "no file dialog available", as before.
+    pub app_files_dir: Option<std::path::PathBuf>,
+    /// The shared internal-storage root (`/storage/emulated/0` on Android), offered as a second
+    /// browse root beside the app-private directory once "All files access" is granted.
+    /// `None` elsewhere (or when it could not be resolved).
+    pub shared_storage_root: Option<std::path::PathBuf>,
+    /// Whether the host's "All files access" (`MANAGE_EXTERNAL_STORAGE`) is currently granted.
+    /// `None` elsewhere.
+    pub shared_storage_granted: Option<Box<dyn Fn() -> bool>>,
+    /// Asks the user to grant "All files access" (the system settings page on Android 11+, the
+    /// permission dialog before that). `None` elsewhere.
+    pub shared_storage_grant: Option<Box<dyn Fn()>>,
+    /// Tells the user the graphics device was lost and the window is closing, once. `saved` is
+    /// the auto-save of unsaved changes (`None`: nothing was unsaved), its path or why it failed.
+    pub device_lost: Option<Box<dyn Fn(Option<Result<String, String>>)>>,
+}
+
+impl Hooks {
+    /// The host's save dialog for `default` (a file name or path), offering its extension: the
+    /// project dialog for project files, else [`Hooks::pick_save_file`]. The project dialog is
+    /// the fallback for hosts without that (the web, whose dialog only names the file): on macOS
+    /// a dialog filtered to projects appends `.ecproj` to any other name (#293). `None` when the
+    /// host has no save dialog; `Some(None)` when it was cancelled.
+    pub fn save_dialog(&self, default: &str) -> Option<Option<String>> {
+        let path = std::path::Path::new(default);
+        let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        match (&self.pick_save_file, &self.pick_save) {
+            (Some(pick), _) if !ext.eq_ignore_ascii_case("ecproj") => Some(pick(default, &ext)),
+            (_, Some(pick)) => Some(pick(&path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())),
+            (Some(pick), None) => Some(pick(default, &ext)),
+            (None, None) => None,
+        }
+    }
+}
+
+>>>>>>> 10410ff0 (android: the in-app file browser, shared storage and the picker view sizes)
 #[derive(Default)]
 pub struct Playback {
     pub playing: bool,
@@ -269,6 +346,10 @@ pub struct EffectcraftApp {
     /// Input from floating panels' own OS windows for the main window's next frame.
     pub(crate) forwarded: ForwardedInput,
     pub(crate) input_waiters: Vec<Sender<serde_json::Value>>,
+    /// Modifier keys as this device's key events report them (Android only: winit reports no
+    /// modifier state there — see `stamp_android_modifiers`).
+    #[cfg(target_os = "android")]
+    android_modifiers: egui::Modifiers,
     /// Control requests waiting for an offloaded job (`wait: true` in the browser).
     pub(crate) job_waiters: Vec<(control::JobWaiter, Sender<serde_json::Value>)>,
     pending_screenshots: Vec<PendingShot>,
@@ -373,10 +454,747 @@ pub(crate) struct FileDialogsUp {
     left: bool,
 }
 
+<<<<<<< HEAD
 impl FileDialogsUp {
     /// Seconds a dialog has to take the keyboard from the app's windows. The desktop portal can
     /// take a moment to show the first dialog on Linux.
     const UNSEEN: f64 = 2.0;
+=======
+impl EffectcraftApp {
+    pub fn new(session: Session) -> Self {
+        let mut ui = UiState::default();
+        let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);
+        EffectcraftApp {
+            session,
+            ui,
+            workspace_store,
+            tokens: Tokens::for_kind(Default::default()),
+            auto: Default::default(),
+            frames: Frames::default(),
+            playback: Playback::default(),
+            dialog: None,
+            hooks: Hooks::default(),
+            fps: 60.0,
+            last_time: 0.0,
+            styled: false,
+            fonts_ready: false,
+            styled_language: "",
+            control_rx: None,
+            deferred: vec![],
+            synthetic: vec![],
+            input_waiters: vec![],
+            #[cfg(target_os = "android")]
+            android_modifiers: egui::Modifiers::NONE,
+            job_waiters: vec![],
+            queued_screenshots: vec![],
+            pending_screenshots: vec![],
+            next_token: 1,
+            last_ui_time: 0.0,
+            last_activity: (0.0, 0),
+            last_edit: (0.0, 0),
+            toast: None,
+            viewer_tex: None,
+            passive_tex: std::collections::HashMap::new(),
+            viewer_native: None,
+            viewer_shown: None,
+            viewer_image: None,
+            viewer_readback: Default::default(),
+            wgpu: None,
+            gpu: None,
+            gpu_checked: false,
+            gpu_failures: None,
+            gpu_failure_applied: None,
+            device_lost_close: None,
+            dialog_answers: std::sync::mpsc::channel(),
+            command_inbox: None,
+            pointer_comp: None,
+            dialog_state: Default::default(),
+            integrated_titlebar: false,
+            audio: None,
+            scrub: None,
+            meter: Default::default(),
+            expression_diagnostics: Default::default(),
+            waveforms: Default::default(),
+            last_reveal: None,
+            applied_prefs: None,
+            recovery: None,
+            dock_rects: vec![],
+            home_thumbs: Default::default(),
+            home_thumb_saved: None,
+            window_title: String::new(),
+            template_thumbs: Default::default(),
+            template_list: None,
+        }
+        .with_ui_commands()
+    }
+
+    /// Keep the saved workspaces for the next session (see [`EffectcraftApp::new`]): After
+    /// Effects' saved workspaces last until they are deleted (#320). `Err` when they weren't
+    /// written (#696): the change applies for this session and a later save retries it, but until
+    /// then a restart brings back what is on disk.
+    pub(crate) fn store_saved_workspaces(&mut self) -> Result<(), String> {
+        let Err(error) = self.workspace_store.save_now(self.session.config.as_deref(), &self.ui) else { return Ok(()) };
+        let message = format!("Workspace changes couldn't be saved and may be lost after a restart: {error}");
+        log::warn!("{message}");
+        self.ui.status = message.clone();
+        // The raw error, so the background retry doesn't report the same failure again.
+        self.workspace_store.error = Some(error);
+        Err(message)
+    }
+
+    /// Offer the frontend's commands (tools, timeline navigation…) for keyboard shortcuts.
+    fn with_ui_commands(mut self) -> Self {
+        let cmds = menus::UI_COMMANDS
+            .iter()
+            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string) })
+            .collect();
+        self.session.set_ui_commands(cmds);
+        self
+    }
+
+    /// Show the crash-recovery dialog for a previous run that didn't exit cleanly.
+    pub fn offer_recovery(&mut self, r: effectcraft_engine::autosave::Recovery) {
+        if r.autosave.is_some() {
+            self.recovery = Some(r);
+            self.dialog = Some(Dialog::Recovery);
+        }
+    }
+
+    /// Apply changed settings: theme and brightness, label colours, tool tips, preview caches.
+    pub fn apply_prefs(&mut self, ctx: &egui::Context) {
+        // Sync with System re-applies when the system appearance changes (the host wakes the UI;
+        // nothing polls).
+        let system = if self.session.prefs.appearance.appearance_mode == "auto" { self.system_light(ctx) } else { None };
+        if self.applied_prefs == Some((self.session.prefs_revision, system)) {
+            return;
+        }
+        self.applied_prefs = Some((self.session.prefs_revision, system));
+        let p = &self.session.prefs;
+        self.ui.theme = theme::ThemeKind::from_name(p.appearance.resolved_theme(system)).unwrap_or_default();
+        self.tokens = Tokens::from_prefs(p, self.ui.theme);
+        theme::apply_visuals(ctx, &self.tokens);
+        ctx.set_theme(theme::theme_preference(&p.appearance.appearance_mode, self.ui.theme.is_light()));
+        let tips = p.general.show_tool_tips;
+        ctx.all_styles_mut(|s| s.interaction.tooltip_delay = if tips { 0.5 } else { f32::INFINITY });
+        // Settings ▸ Appearance ▸ UI Scale (#284). egui's own Ctrl+= / Ctrl+- / Ctrl+0 zoom stays
+        // off: Ctrl+0 is Window ▸ Project, and the scale is a setting.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        ctx.set_zoom_factor(p.appearance.ui_scale as f32 / 100.0);
+        self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
+        self.ui.viewer.fast_preview = p.previews.fast_previews;
+        self.frames.set_budget(p.cache_budgets(self.session.sys_memory).preview);
+    }
+
+    /// Change settings from the UI (applied next frame and saved).
+    pub fn set_pref(&mut self, key: &str, value: serde_json::Value) -> Result<(), String> {
+        self.session.prefs.set(key, value)?;
+        self.session.prefs_changed();
+        self.session.save_prefs();
+        Ok(())
+    }
+
+    pub fn with_control(mut self, rx: Receiver<ControlRequest>) -> Self {
+        self.control_rx = Some(rx);
+        self
+    }
+
+    /// Show theme `k`: the appearance mode becomes its family's (Dark or Light), and `k` that
+    /// family's theme.
+    pub fn set_theme(&mut self, ctx: &egui::Context, k: theme::ThemeKind) {
+        if let Err(e) = self.set_pref("appearance.theme", json!(k.name())) {
+            self.ui.status = e;
+        }
+        self.apply_prefs(ctx);
+    }
+
+    /// The system appearance: light (`Some(true)`), dark, or unknown. The host's answer (the Linux
+    /// desktop portal) wins over egui's, which Wayland compositors often leave empty.
+    pub fn system_light(&self, ctx: &egui::Context) -> Option<bool> {
+        self.hooks.system_theme.as_ref().and_then(|read| read(ctx)).or_else(|| ctx.system_theme()).map(|t| t == egui::Theme::Light)
+    }
+
+    /// The Tools bar's appearance button (`view.theme.toggle`): Sync with System, then Light, then
+    /// Dark, then Sync with System again. The light and dark theme choices are kept.
+    pub fn cycle_appearance(&mut self, ctx: &egui::Context) {
+        let next = match self.session.prefs.appearance.appearance_mode.as_str() {
+            "auto" => "light",
+            "light" => "dark",
+            _ => "auto",
+        };
+        if let Err(e) = self.set_pref("appearance.appearanceMode", json!(next)) {
+            self.ui.status = e;
+        }
+        self.apply_prefs(ctx);
+    }
+
+    pub fn set_workspace(&mut self, name: &str) {
+        // Learn: the Home screen's Learn tab (tutorials) in the Composition panel. Leaving it for
+        // another workspace closes the Home screen again: it stayed over every workspace until a
+        // project was created (#272).
+        if name == "Learn" {
+            self.ui.start_screen = true;
+            self.ui.home_learn = true;
+            self.ui.home_templates = false;
+        } else if self.ui.workspace == "Learn" {
+            self.ui.start_screen = false;
+            self.ui.home_learn = false;
+        }
+        self.ui.workspace = name.to_string();
+        self.ui.dock = self.ui.saved_workspaces.get(name).cloned().unwrap_or_else(|| dock::workspace(name));
+        self.ui.floating = self.ui.saved_floating.get(name).cloned().unwrap_or_else(|| dock::workspace_floating(name));
+        self.ui.maximized = None;
+    }
+
+    /// Built-in workspaces followed by the saved ones (Window ▸ Workspace ▸ Save as New Workspace).
+    pub fn workspace_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = dock::WORKSPACES.iter().map(|s| s.to_string()).collect();
+        v.extend(self.saved_workspace_names());
+        v
+    }
+
+    /// The workspaces the user saved under a new name (built-ins whose changes were saved are
+    /// not repeated), in name order.
+    pub fn saved_workspace_names(&self) -> Vec<String> {
+        self.ui.saved_workspaces.keys().filter(|k| !dock::WORKSPACES.contains(&k.as_str())).cloned().collect()
+    }
+
+    /// The open Gradient Editor's draft (`panels::gradient_editor`): what OK would set.
+    pub fn gradient_draft(&self) -> &panels::gradient_editor::Draft {
+        &self.dialog_state.gradient
+    }
+
+    /// The open Gradient Editor's draft, to edit (tests and automation; the editor's own fields
+    /// do the same).
+    pub fn gradient_draft_mut(&mut self) -> &mut panels::gradient_editor::Draft {
+        &mut self.dialog_state.gradient
+    }
+
+    /// Feed this frame's share of the queued synthetic input (control channel `ui.click`,
+    /// `ui.drag`…) into `raw_input`. Pointer events go one per frame so egui sees press → moves
+    /// → release as a real gesture.
+    pub fn feed_synthetic(&mut self, raw_input: &mut egui::RawInput) {
+        if !self.synthetic.is_empty() {
+            // Pointer events go one per frame so egui sees press → moves → release as a real drag.
+            let pointer = |e: &egui::Event| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. });
+            let n = if pointer(&self.synthetic[0]) {
+                1
+            } else {
+                self.synthetic
+                    .iter()
+                    .position(|e| pointer(e) || matches!(e, egui::Event::Key { pressed: false, .. }))
+                    .map_or(self.synthetic.len(), |i| if pointer(&self.synthetic[i]) { i.max(1) } else { i + 1 })
+            };
+            raw_input.events.extend(self.synthetic.drain(..n));
+        }
+    }
+
+    /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
+    /// give it the focus: Window ▸ <panel>.
+    pub fn show_panel(&mut self, p: PanelKind) {
+        if !self.ui.floating.iter().any(|f| f.panels.contains(&p)) && self.ui.maximized.is_some_and(|m| m != p) {
+            self.ui.maximized = None;
+        }
+        self.raise_panel(p);
+        self.ui.focused = p;
+    }
+
+    /// Bring panel `p` to the front of its group, opening it in its usual place if it is closed,
+    /// without moving the focus (a comp opening brings up its viewer, an effect applied brings up
+    /// Effect Controls).
+    pub fn raise_panel(&mut self, p: PanelKind) {
+        if self.ui.floating.iter().any(|group| group.panels.contains(&p)) {
+            self.edit_layout(|layout| layout.apply(craft_ui::docking::Action::Activate { panel: p }).is_ok());
+            return;
+        }
+        if !self.ui.dock.contains(p) {
+            // The Composition panel lives in the centre, with the Layer panel and other viewers;
+            // with none of those left, above the Timeline.
+            let centre = |d: &dock::DockNode| {
+                let mut v = Vec::new();
+                d.panels(&mut v);
+                v.into_iter().find(|q| matches!(q, PanelKind::Layer | PanelKind::Viewer(_) | PanelKind::Flowchart | PanelKind::Footage))
+            };
+            let near = match p {
+                PanelKind::Composition => match centre(&self.ui.dock) {
+                    Some(q) => q,
+                    None if self.ui.dock.dock_panel(p, PanelKind::Timeline, dock::Zone::Top) => {
+                        self.ui.dock.activate(p);
+                        return;
+                    }
+                    None => PanelKind::EffectsPresets,
+                },
+                PanelKind::Layer | PanelKind::Flowchart | PanelKind::Viewer(_) => PanelKind::Composition,
+                PanelKind::RenderQueue => PanelKind::Timeline,
+                PanelKind::EffectControls | PanelKind::History => PanelKind::Project,
+                _ => PanelKind::EffectsPresets,
+            };
+            self.ui.dock.open_near(p, near);
+        }
+        self.ui.dock.activate(p);
+    }
+
+    pub fn render_source(&self) -> RenderSource {
+        RenderSource {
+            project: self.session.project.clone(),
+            footage: self.session.footage.clone(),
+            expr: self.session.expr.clone(),
+            layer_cache: self.session.layer_cache.clone(),
+            gpu: self.gpu.clone(),
+            gpu_display: self.gpu_display(),
+            disk: self.session.disk_cache.clone(),
+        }
+    }
+
+    /// Keep GPU-composited viewer frames on the GPU (drawn from their texture). The browser can't
+    /// read frames back (its thread can't wait for the GPU), so there the viewer shows GPU frames
+    /// directly whenever it draws them plainly (RGB, no exposure, no region of interest); the
+    /// desktop reads them back (see [`frames::RenderSource::gpu_display`]).
+    fn gpu_display(&self) -> bool {
+        let v = &self.session.state.viewer;
+        cfg!(target_arch = "wasm32")
+            && v.channel == effectcraft_engine::viewer::Channel::Rgb
+            && v.exposure == 0.0
+            && self.session.state.region_of_interest.is_none()
+            && self.ui.viewer.extended.is_none()
+    }
+
+    /// The UI draws its panels and handles input such as dropped files. Until the fonts are
+    /// installed (the first frames) it draws nothing, and that input goes unhandled.
+    pub fn is_ready(&self) -> bool {
+        self.fonts_ready
+    }
+
+    /// Provide the executable/embedding host's device notifications. The host installs the
+    /// handlers once; this frontend never replaces handlers on a borrowed device.
+    pub fn set_gpu_failure_bridge(&mut self, bridge: gpu_failure::GpuFailureBridge) {
+        if let Some(gpu) = &self.gpu {
+            bridge.forward_to(gpu.context().device_failure_notifier());
+        }
+        self.gpu_failures = Some(bridge);
+    }
+
+    fn apply_gpu_failure(&mut self, ctx: &egui::Context) {
+        let Some(bridge) = &self.gpu_failures else { return };
+        // Readback deadlines can retire the compositor without a host device notification.
+        if let Some(gpu) = &self.gpu
+            && let Err(reason) = gpu.context().check_health()
+        {
+            bridge.report(&reason, false);
+        }
+        let Some(failure) = bridge.failure() else { return };
+        if self.gpu_failure_applied == Some(failure.presentation_lost) {
+            return;
+        }
+        self.gpu_failure_applied = Some(failure.presentation_lost);
+        self.gpu_checked = true;
+        self.frames.retire_gpu();
+        self.session.accel = None;
+        self.session.accel_note = Some(format!("GPU preview retired: {}", failure.reason));
+        self.session.layer_cache.clear();
+        self.gpu = None;
+        if let Some(rs) = &self.wgpu {
+            let mut renderer = rs.renderer.write();
+            if let Some((id, _, _)) = &self.viewer_native {
+                renderer.free_texture(id);
+            }
+            for (_, texture) in self.passive_tex.values() {
+                if let panels::viewers::PassiveTexture::Gpu(id, _) = texture {
+                    renderer.free_texture(id);
+                }
+            }
+        }
+        self.viewer_native = None;
+        self.passive_tex.retain(|_, (_, texture)| matches!(texture, panels::viewers::PassiveTexture::Cpu(_)));
+        self.viewer_shown = self.viewer_tex.as_ref().map(|(texture, key, _)| (texture.id(), *key));
+        self.viewer_image = None;
+        // Old completion closures retain only their detached slot, not the replacement.
+        self.viewer_readback = Default::default();
+        self.wgpu = None;
+        self.ui.status = if failure.presentation_lost {
+            "Graphics device lost. The project is still open; presentation requires restarting the application.".into()
+        } else {
+            "Shared GPU preview disabled; CPU compositing remains available.".into()
+        };
+        log::warn!("GPU preview retired: {}", failure.reason);
+        ctx.request_repaint();
+    }
+
+    /// After the graphics device is lost, eframe's renderer cannot draw again: any mesh makes
+    /// egui-wgpu panic on the main thread when it cannot stage its index buffer (#591). Draw
+    /// nothing from then on, auto-save a project with unsaved changes (keeping the crash
+    /// recovery marker, so the next launch offers it) and close the window.
+    fn close_after_device_loss(&mut self, ctx: &egui::Context) {
+        if self.device_lost_close.is_some() {
+            return;
+        }
+        let keep_recovery = self.session.is_dirty();
+        let saved = keep_recovery.then(|| match self.session.autosave_now().and_then(|path| self.session.autosave_wait().map(|()| path)) {
+            Ok(path) => {
+                log::warn!("graphics device lost: auto-saved {path}; the next launch offers to recover it");
+                Ok(path)
+            }
+            Err(e) => {
+                log::error!("graphics device lost: {e}");
+                Err(e.to_string())
+            }
+        });
+        self.device_lost_close = Some(keep_recovery);
+        log::warn!("graphics device lost: closing the window");
+        if let Some(tell) = &self.hooks.device_lost {
+            tell(saved);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Run the commands whose non-blocking file dialogs have been answered.
+    pub(crate) fn run_dialog_answers(&mut self) {
+        while let Ok(answer) = self.dialog_answers.1.try_recv() {
+            menus::dialog_answered(self, answer);
+        }
+    }
+
+    /// Set up the GPU compositor on egui-wgpu's device (once). Without an adapter that runs
+    /// compute shaders (WebGL2, software GL) everything stays on the CPU.
+    pub(crate) fn init_gpu(&mut self, frame: &eframe::Frame) {
+        if self.gpu_checked {
+            return;
+        }
+        self.gpu_checked = true;
+        if self.gpu_failures.as_ref().is_some_and(|bridge| bridge.failure().is_some()) {
+            return;
+        }
+        let Some(rs) = frame.wgpu_render_state() else { return };
+        // Help ▸ System Compatibility Report names the adapter and backend the window got.
+        let info = rs.adapter.get_info();
+        self.session.window_adapter = Some(format!(
+            "{} ({:?}, {:?}{})",
+            info.name,
+            info.backend,
+            info.device_type,
+            if info.driver.is_empty() { String::new() } else { format!(", {} {}", info.driver, info.driver_info) }
+        ));
+        // Backend validation can panic on shader compilation even when device creation
+        // succeeded. Keep the document and the egui renderer, and use CPU compositing.
+        let gpu = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effectcraft_gpu::Gpu::new(&rs.adapter, rs.device.clone(), rs.queue.clone())));
+        match gpu {
+            Ok(Ok(g)) => {
+                if let Some(bridge) = &self.gpu_failures {
+                    bridge.forward_to(g.context().device_failure_notifier());
+                    if bridge.failure().is_some() {
+                        return;
+                    }
+                }
+                log::info!("GPU compositor: {}", effectcraft_engine::render::Accelerator::name(&g));
+                self.session.accel = Some(Arc::new(g.clone()));
+                self.gpu = Some(g);
+                self.wgpu = Some(rs.clone());
+            }
+            Ok(Err(e)) => {
+                log::info!("GPU compositor unavailable: {e}");
+                self.session.accel_note = Some(format!("GPU compositor unavailable: {e}"));
+            }
+            Err(e) => {
+                let reason = e.downcast_ref::<String>().map(String::as_str).or_else(|| e.downcast_ref::<&str>().copied()).unwrap_or("backend panicked");
+                log::warn!("GPU compositor setup failed; using CPU compositing: {reason}");
+                self.session.accel_note = Some(format!("GPU compositor setup failed: {reason}"));
+            }
+        }
+    }
+
+    /// The viewer shows a frame composited on the GPU (drawn from its wgpu texture).
+    pub fn viewer_on_gpu(&self) -> bool {
+        matches!((&self.viewer_shown, &self.viewer_native), (Some(s), Some(n)) if s.1 == n.1)
+    }
+
+    /// The GPU compositor's adapter, when the viewer has one.
+    pub fn gpu_adapter(&self) -> Option<String> {
+        self.gpu.as_ref().map(effectcraft_engine::render::Accelerator::name)
+    }
+
+    /// The size of the viewer frame's texture (CPU frames; fitted to the GPU's texture limit).
+    pub fn viewer_texture_size(&self) -> Option<[usize; 2]> {
+        self.viewer_tex.as_ref().map(|(t, _, _)| t.size())
+    }
+
+    /// The viewer's current pixels as 8-bit premultiplied RGBA, reading a GPU frame back the
+    /// first time something asks for it.
+    ///
+    /// The browser can't wait for the GPU: there the first call starts an asynchronous readback
+    /// and returns `None`; a later call (the next frame) has the pixels.
+    pub fn viewer_pixels(&mut self) -> Option<Arc<egui::ColorImage>> {
+        let to_image = |bytes: Vec<u8>, w: u32, h: u32| {
+            let px = bytes.as_chunks::<4>().0.iter().map(|c| egui::Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3])).collect();
+            Arc::new(egui::ColorImage::new([w as usize, h as usize], px))
+        };
+        if self.viewer_image.is_none()
+            && let (Some((_, key, f)), Some(g)) = (&self.viewer_native, &self.gpu)
+            && self.viewer_shown.as_ref().map(|s| s.1) == Some(*key)
+        {
+            if cfg!(target_arch = "wasm32") {
+                let ready = self.viewer_readback.1.lock().ok().and_then(|mut r| r.take_if(|r| r.0 == *key));
+                if let Some((_, img)) = ready {
+                    self.viewer_image = Some(img);
+                } else if self.viewer_readback.0 != Some(*key) {
+                    self.viewer_readback.0 = Some(*key);
+                    let (slot, k, (w, h)) = (self.viewer_readback.1.clone(), *key, (f.width, f.height));
+                    let ctx = self.frames.context();
+                    g.read_display_async(f, move |bytes| {
+                        if let (Some(b), Ok(mut s)) = (bytes, slot.lock()) {
+                            *s = Some((k, to_image(b, w, h)));
+                        }
+                        if let Some(c) = ctx {
+                            c.request_repaint();
+                        }
+                    });
+                }
+            } else if let Some(bytes) = g.read_display(f) {
+                self.viewer_image = Some(to_image(bytes, f.width, f.height));
+            }
+        }
+        self.viewer_image.clone()
+    }
+
+    /// The viewer's Resolution: the active composition's (saved with the project).
+    pub fn viewer_res(&self) -> state::Resolution {
+        self.session.active_comp().map(|c| c.resolution).unwrap_or_default()
+    }
+
+    /// The render scale used by the viewer right now.
+    pub fn viewer_scale(&self, zoom: f32, ppp: f32) -> f64 {
+        // The preview's Resolution (when not Auto) while it plays.
+        if self.playback.playing
+            && let Some(f) = self.playback.res
+        {
+            return state::Resolution::from_factor(f.into()).scale(zoom, ppp);
+        }
+        // Auto follows the zoom alike while playing and paused, so frames cached while scrubbing
+        // play back, and frames cached by a preview stay on screen when it stops.
+        let res = self.viewer_res();
+        let full = res.scale(zoom, ppp);
+        // Fast Previews ▸ Adaptive Resolution / Fast Draft: lower resolution while dragging.
+        let (_, k) = self.session.state.viewer.fast_previews.render(self.ui.viewer.interacting || self.ui.viewer.property_interacting);
+        if k < 1.0 && res.is_auto() {
+            return full.min((full * 0.5).max(self.session.prefs.adaptive_limit()));
+        }
+        full
+    }
+
+    /// The cache key of viewer frame `frame` of `comp` at `scale` (see [`Self::frame_series`]).
+    pub fn frame_key(&self, comp: ItemId, frame: i64, scale: f64) -> FrameKey {
+        FrameKey { frame, ..self.frame_series(comp, scale) }
+    }
+
+    /// The key of frame 0 of `comp`'s viewer frames at `scale` (the content, view and render
+    /// options are the same for every frame: loops compute this once).
+    pub fn frame_series(&self, comp: ItemId, scale: f64) -> FrameKey {
+        FrameKey {
+            revision: self.session.revision,
+            content: self.frames.content_of(&self.session.project, self.session.revision, comp),
+            comp: comp.0,
+            frame: 0,
+            scale: (scale * 1000.0).round() as u32,
+            view: self.view_hash(comp),
+            opts: frames::opts_hash(&self.frame_opts(comp, scale)),
+        }
+    }
+
+    /// The frame series the viewer of `comp` shows now (its scale, view and options, for the
+    /// comp's current content): what the cache bars count.
+    pub fn shown_series(&self, comp: ItemId) -> FrameKey {
+        let scale = self.viewer_shown.as_ref().filter(|(_, k)| k.comp == comp.0).map_or(1000, |(_, k)| k.scale);
+        self.frame_series(comp, scale as f64 / 1000.0)
+    }
+
+    /// Hash of the comp viewer's 3D view camera (0 for the active camera view).
+    pub fn view_hash(&self, comp: ItemId) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        // The region of interest changes what is rendered too.
+        let roi = self.viewer_region(comp);
+        if let Some(r) = roi {
+            r.map(f64::to_bits).hash(&mut h);
+        }
+        let Some(cam) = self.session.view_camera(comp) else { return if roi.is_some() { h.finish() | 1 } else { 0 } };
+        for row in cam.view.0 {
+            for v in row {
+                v.to_bits().hash(&mut h);
+            }
+        }
+        cam.zoom.to_bits().hash(&mut h);
+        cam.ortho.hash(&mut h);
+        h.finish() | 1
+    }
+
+    /// The comp-space region viewer frames of `comp` cover: the region of interest, else the
+    /// Extended Viewer's area (frame plus pasteboard), else `None` (the whole frame).
+    pub fn viewer_region(&self, comp: ItemId) -> Option<[f64; 4]> {
+        if self.session.active_comp_id() != Some(comp) {
+            return None;
+        }
+        self.session.state.region_of_interest.or(self.ui.viewer.extended)
+    }
+
+    /// Request a prefetch frame render (no-op if cached/in flight).
+    pub fn request_frame(&self, comp: ItemId, frame: i64, scale: f64) {
+        self.request_frame_with(comp, frame, scale, false);
+    }
+
+    /// Request the frame on screen: rendered before any queued prefetch.
+    pub fn request_frame_urgent(&self, comp: ItemId, frame: i64, scale: f64) {
+        self.request_frame_with(comp, frame, scale, true);
+    }
+
+    /// Render options of viewer frames of `comp` at `scale`.
+    pub fn frame_opts(&self, comp: ItemId, scale: f64) -> RenderOpts {
+        let (draft, _) = self.session.state.viewer.fast_previews.render(self.ui.viewer.interacting || self.ui.viewer.property_interacting);
+        let roi = self.viewer_region(comp);
+        RenderOpts {
+            scale,
+            motion_blur: true,
+            guides: true,
+            draft: self.ui.viewer.fast_preview || draft,
+            view: self.session.view_camera(comp),
+            roi,
+            backend: effectcraft_engine::render::Backend::Auto,
+            nested_switches: self.session.prefs.general.switches_affect_nested_comps,
+            draft_shadows: self.session.prefs.three_d.realtime_shadows,
+            proxy: Default::default(),
+        }
+    }
+
+    fn request_frame_with(&self, comp: ItemId, frame: i64, scale: f64, urgent: bool) {
+        let Some(c) = self.session.project.comp(comp) else { return };
+        let key = self.frame_key(comp, frame, scale);
+        let t = c.frame_rate.tick_of(frame);
+        let opts = self.frame_opts(comp, scale);
+        if urgent {
+            self.frames.request_urgent(&self.render_source(), key, comp, t, opts);
+        } else {
+            self.frames.request(&self.render_source(), key, comp, t, opts);
+        }
+    }
+
+    // ---------------------------------------------------------------- playback
+
+    pub fn play(&mut self, now: f64) {
+        let sc = self.session.prefs.preview.current;
+        self.play_with(now, sc);
+    }
+
+    /// Start the preview of a Preview panel shortcut (its range, play-from, rate, skip,
+    /// resolution, loop, caching, full screen and include options).
+    pub fn play_with(&mut self, now: f64, sc: effectcraft_engine::preview::PreviewShortcut) {
+        let Some(c) = self.session.active_comp_arc() else { return };
+        let preset = self.session.prefs.preview.get(sc).clone();
+        let plan = effectcraft_engine::preview::plan(&preset, &c, self.session.time());
+        let fr = c.frame_rate;
+        if plan.video {
+            self.session.set_time(fr.tick_of(plan.first));
+        }
+        let restore_max = preset.full_screen.then_some(self.ui.maximized);
+        let viewer = panels::viewers::active_panel(self);
+        if preset.full_screen && self.ui.dock.contains(viewer) {
+            self.ui.maximized = Some(viewer);
+        }
+        self.playback = Playback {
+            playing: true,
+            start_wall: now,
+            start_time: fr.tick_of(plan.first),
+            start_frame: plan.first,
+            shown: 0,
+            waiting: false,
+            fps: plan.fps,
+            shortcut: sc,
+            plan: Some(plan),
+            caching: plan.cache_first && plan.video,
+            res: preset.resolution.factor(preset.custom_resolution),
+            overlays: preset.include_overlays,
+            layer_controls: preset.include_layer_controls,
+            restore_max,
+            audio_frame: (!plan.video).then_some(plan.first),
+            audio_held: false,
+            shown_at: Default::default(),
+        };
+        if !self.playback.caching {
+            if plan.video {
+                self.playback.audio_held = self.audio_plays();
+            } else {
+                self.start_audio(fr.tick_of(plan.first));
+            }
+        }
+    }
+
+    /// The preview includes audio at the comp's frame rate and the comp has something audible.
+    fn audio_plays(&self) -> bool {
+        let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else { return false };
+        let Some(c) = self.session.project.comp(cid) else { return false };
+        // A preview at another frame rate plays slower or faster than real time: silent.
+        pl.audio && (pl.fps - c.frame_rate.as_f64()).abs() <= 0.01 && effectcraft_engine::render::audio::comp_has_audio(&self.session.project, cid)
+    }
+
+    /// Start audio preview from comp time `t` when [`Self::audio_plays`] and an output device
+    /// opens.
+    fn start_audio(&mut self, t: Tick) {
+        self.audio = None;
+        self.meter.clipped = [false; 2];
+        let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else { return };
+        let Some(c) = self.session.project.comp_arc(cid).filter(|_| self.audio_plays()) else { return };
+        let out = audio::AudioOutput::from_prefs(&self.session.prefs);
+        let Some(dev) = self.hooks.audio_device.as_ref().and_then(|f| f(&out)) else { return };
+        let mix = self.session.prefs.audio.preview_sample_rate;
+        let fr = c.frame_rate;
+        match audio::AudioPlayback::start(dev, self.render_source(), cid, t, fr.tick_of(pl.start), fr.tick_of(pl.end + 1), pl.looping, mix) {
+            Ok(a) => self.audio = Some(a),
+            Err(e) => log::warn!("audio preview: {e}"),
+        }
+    }
+
+    /// Audio scrubbing: play the frame of `comp` at `t` (see [`audio::AudioScrub`]), opening the
+    /// output on first use. Silent comps and missing devices do nothing.
+    pub fn scrub_audio(&mut self, comp: ItemId, t: Tick, now: f64) {
+        if self.playback.playing || !effectcraft_engine::render::audio::comp_has_audio(&self.session.project, comp) {
+            return;
+        }
+        if self.scrub.is_none() {
+            let out = audio::AudioOutput::from_prefs(&self.session.prefs);
+            let Some(dev) = self.hooks.audio_device.as_ref().and_then(|f| f(&out)) else { return };
+            match audio::AudioScrub::open(dev, now) {
+                Ok(s) => self.scrub = Some(s),
+                Err(e) => {
+                    log::warn!("audio scrubbing: {e}");
+                    return;
+                }
+            }
+        }
+        let src = self.render_source();
+        let mix = self.session.prefs.audio.preview_sample_rate;
+        if let Some(s) = &mut self.scrub {
+            s.play(&src, comp, t, mix, now);
+        }
+    }
+
+    pub fn stop(&mut self) {
+        let was = std::mem::replace(&mut self.playback.playing, false);
+        self.audio = None;
+        self.playback.caching = false;
+        if !was {
+            return;
+        }
+        if let Some(m) = self.playback.restore_max.take() {
+            self.ui.maximized = m;
+        }
+        let Some(pl) = self.playback.plan else { return };
+        let move_time = self.session.prefs.preview.get(self.playback.shortcut).move_time_to_preview_time;
+        if !move_time {
+            self.session.set_time(pl.origin);
+        } else if let Some(f) = self.playback.audio_frame
+            && let Some(c) = self.session.active_comp()
+        {
+            let t = c.frame_rate.tick_of(f);
+            self.session.set_time(t);
+        }
+    }
+>>>>>>> 10410ff0 (android: the in-app file browser, shared storage and the picker view sizes)
 
     pub(crate) fn opened(&mut self) {
         if self.count == 0 {
@@ -412,6 +1230,7 @@ pub(crate) struct ForwardedInput {
     pub(crate) files: Vec<egui::DroppedFileHandle>,
 }
 
+<<<<<<< HEAD
 /// Record the scale the viewer drew at (called by the viewer panel each pass).
 ///
 /// Playback itself advances in [`EffectcraftApp::tick`], so it keeps running while the window is
@@ -422,3 +1241,481 @@ pub(crate) fn note_viewer_scale(app: &mut EffectcraftApp, scale: f64) {
 
 #[cfg(test)]
 mod lifecycle_tests;
+=======
+impl eframe::App for EffectcraftApp {
+    fn on_exit(&mut self) {
+        self.save_workspace_state();
+        // Clean exit: no crash recovery next launch (unless the graphics device was lost with
+        // unsaved changes, which are in the auto-save it offers).
+        if self.device_lost_close != Some(true) {
+            self.session.end_recovery();
+        }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let injected = !self.synthetic.is_empty();
+        self.feed_synthetic(raw_input);
+        if pointer_wrap::prepare_input(ctx, raw_input, injected) {
+            self.session.history.merge_key = None;
+        }
+        // Last, so it stamps every event the frame carries: Android's winit reports no modifier
+        // state and never emits `ModifiersChanged`, so egui's chords would never match without it.
+        #[cfg(target_os = "android")]
+        stamp_android_modifiers(&mut raw_input.events, &mut self.android_modifiers);
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_gpu_failure(ctx);
+        // The CJK fallback fonts depend on the interface language, so they follow a change of
+        // Settings ▸ General ▸ Language instead of only the first frame.
+        let language = crate::i18n::language(self);
+        crate::i18n::set_current(language);
+        if !self.styled || self.styled_language != language {
+            theme::install(ctx, &self.tokens, language);
+            self.styled_language = language;
+            if !self.styled {
+                fit_window(ctx);
+                self.styled = true;
+            }
+            ctx.request_repaint();
+        } else {
+            self.fonts_ready = true;
+        }
+        let now = ctx.input(|i| i.time);
+        let dt = (now - self.last_time) as f32;
+        if dt > 0.0 {
+            self.fps = self.fps * 0.9 + (1.0 / dt).min(480.0) * 0.1;
+        }
+        self.last_time = now;
+        self.drain_control(ctx);
+        if !self.synthetic.is_empty() {
+            ctx.request_repaint();
+        } else if !self.input_waiters.is_empty() {
+            for w in self.input_waiters.drain(..) {
+                let _ = w.send(json!({"ok": true, "result": null}));
+            }
+        }
+        self.issue_screenshots(ctx);
+        self.collect_screenshots(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.gpu_failure_applied == Some(true) {
+            self.close_after_device_loss(ui.ctx());
+            return;
+        }
+        self.init_gpu(frame);
+        if !self.fonts_ready {
+            ui.ctx().request_repaint();
+            return;
+        }
+        self.frame(ui);
+        let ctx = ui.ctx().clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        pointer_wrap::finish_native(&ctx, frame);
+        // wasm32: no frame threads; render queued frames now, between UI frames.
+        if cfg!(target_arch = "wasm32") && self.frames.pump(std::time::Duration::from_millis(if self.playback.playing { 24 } else { 40 })) {
+            ctx.request_repaint();
+        }
+        self.last_ui_time = ctx.input(|i| i.time);
+        if !self.synthetic.is_empty() {
+            ctx.request_repaint();
+        } else if !self.input_waiters.is_empty() {
+            ctx.request_repaint();
+            for w in self.input_waiters.drain(..) {
+                let _ = w.send(json!({"ok": true, "result": null}));
+            }
+        }
+        if self.frames.inflight() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+    }
+}
+
+/// Advance playback with the viewer's scale (called by the viewer panel each frame).
+pub(crate) fn tick_playback(app: &mut EffectcraftApp, ctx: &egui::Context, scale: f64) {
+    app.advance_playback(ctx, scale);
+}
+
+/// Put `width` × `height` straight-alpha RGBA8 pixels on the system clipboard (Composition ▸ Copy
+/// Frame to Clipboard). The pixel count is checked first: egui's image constructor panics on a
+/// size that doesn't match its buffer.
+fn copy_image(ctx: &egui::Context, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || w.checked_mul(h).and_then(|n| n.checked_mul(4)) != Some(rgba.len()) {
+        return Err(format!("cannot copy a malformed {width}×{height} image to the clipboard"));
+    }
+    ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied([w, h], rgba));
+    Ok(())
+}
+
+/// Maximize a first window that doesn't fit the screen, which fits it to the space beside the
+/// taskbar or dock. The 1680 × 1020 window on a smaller screen is only shrunk to the monitor's
+/// size, so with its title bar it ran under the taskbar and cut menus off at the bottom of the
+/// screen (#269).
+fn fit_window(ctx: &egui::Context) {
+    let (monitor, window) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().outer_rect.or(i.viewport().inner_rect)));
+    if let (Some(monitor), Some(window)) = (monitor, window)
+        && overflows_screen(window.size(), monitor)
+    {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+    }
+}
+
+/// Whether a window `size` leaves no room on a `monitor` for a taskbar or dock (points).
+fn overflows_screen(size: egui::Vec2, monitor: egui::Vec2) -> bool {
+    const TASKBAR: f32 = 64.0;
+    size.x > monitor.x || size.y > monitor.y - TASKBAR
+}
+
+#[cfg(test)]
+mod fit_window_tests {
+    use super::overflows_screen;
+    use egui::vec2;
+
+    #[test]
+    fn a_window_taller_than_the_screen_beside_its_taskbar_overflows() {
+        // The default window on a 1366 × 768 laptop (shrunk to the monitor) and on 1080p.
+        assert!(overflows_screen(vec2(1366.0, 799.0), vec2(1366.0, 768.0)));
+        assert!(overflows_screen(vec2(1680.0, 1051.0), vec2(1920.0, 1080.0)));
+        assert!(!overflows_screen(vec2(1680.0, 1051.0), vec2(2560.0, 1440.0)));
+    }
+}
+
+#[cfg(test)]
+mod copy_frame_tests {
+    use super::*;
+
+    fn copied(output: &egui::FullOutput) -> Vec<&egui::ColorImage> {
+        output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyImage(image) => Some(image),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Composition ▸ Copy Frame to Clipboard puts the rendered frame on the system clipboard.
+    #[test]
+    fn copy_frame_puts_the_frame_on_the_clipboard() {
+        let mut session = Session::default();
+        session.execute("comp.new", json!({"name": "Copy", "width": 8, "height": 6, "duration": 1})).unwrap();
+        session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+        let mut app = EffectcraftApp::new(session);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::menus::invoke(&mut app, ui.ctx(), "comp.copyFrame", json!({})).unwrap();
+            app.handle_events(ui.ctx());
+        });
+        output.textures_delta.clear();
+        let images = copied(&output);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].size, [8, 6]);
+        assert!(images[0].pixels.iter().all(|p| *p == egui::Color32::from_rgb(255, 0, 0)));
+    }
+
+    /// A malformed image never reaches egui's panicking constructor.
+    #[test]
+    fn a_malformed_image_is_an_error_not_a_crash() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(copy_image(ui.ctx(), 4, 4, &[0; 10]).is_err());
+            assert!(copy_image(ui.ctx(), 0, 4, &[]).is_err());
+            assert!(copy_image(ui.ctx(), u32::MAX, u32::MAX, &[0; 4]).is_err());
+        });
+        output.textures_delta.clear();
+        assert!(copied(&output).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod gpu_failure_tests {
+    use super::*;
+
+    #[test]
+    fn host_failure_preserves_document_undo_and_cpu_pixels_and_detaches_late_readbacks() {
+        let mut session = Session::default();
+        let comp = ItemId(session.execute("comp.new", json!({"name": "Recovery", "width": 4, "height": 4, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        session.execute("layer.newSolid", json!({"comp": comp.0, "color": "#ff0000"})).unwrap();
+        let before = session.render(comp, Tick::ZERO, RenderOpts::default());
+        let project = session.project.clone();
+        let revision = session.revision;
+        let prefs = serde_json::to_value(&session.prefs).unwrap();
+        let mut app = EffectcraftApp::new(session);
+        let ctx = egui::Context::default();
+        let bridge = gpu_failure::GpuFailureBridge::new(&ctx);
+        app.set_gpu_failure_bridge(bridge.clone());
+        let late_slot = app.viewer_readback.1.clone();
+        let key = FrameKey { revision, content: 1, comp: comp.0, frame: 0, scale: 1000, view: 0, opts: 0 };
+        app.viewer_readback.0 = Some(key);
+        bridge.report("synthetic host device failure", true);
+        app.apply_gpu_failure(&ctx);
+        assert!(Arc::ptr_eq(&project, &app.session.project));
+        assert_eq!(app.session.revision, revision);
+        assert_eq!(serde_json::to_value(&app.session.prefs).unwrap(), prefs);
+        assert!(app.gpu_checked, "failed device cannot be initialized again next frame");
+        assert!(app.session.accel.is_none());
+        assert!(app.ui.status.contains("presentation requires restarting"));
+        assert_eq!(app.session.render(comp, Tick::ZERO, RenderOpts::default()).data, before.data);
+        *late_slot.lock().unwrap() = Some((key, Arc::new(egui::ColorImage::new([1, 1], vec![egui::Color32::RED]))));
+        assert!(app.viewer_readback.0.is_none());
+        assert!(app.viewer_readback.1.lock().unwrap().is_none(), "a late completion cannot refill the replacement slot");
+        app.session.execute("edit.undo", json!({})).unwrap();
+        assert!(app.session.project.comp(comp).unwrap().layers.is_empty());
+        app.session.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(app.session.render(comp, Tick::ZERO, RenderOpts::default()).data, before.data);
+    }
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+    use crate::theme::ThemeKind;
+
+    fn app() -> EffectcraftApp {
+        EffectcraftApp::new(effectcraft_engine::Session::default())
+    }
+
+    /// The Tools bar's appearance button: Sync with System, Light, Dark, then Sync with System
+    /// again, showing the saved theme of each family without losing either choice.
+    #[test]
+    fn appearance_button_cycles_modes_without_losing_theme_choices() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.hooks.system_theme = Some(Box::new(|_| Some(egui::Theme::Dark)));
+        app.set_pref("appearance.darkTheme", json!("darker")).unwrap();
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.theme, ThemeKind::Darker);
+        for (mode, shown) in [("auto", ThemeKind::Darker), ("light", ThemeKind::Light), ("dark", ThemeKind::Darker), ("auto", ThemeKind::Darker)] {
+            menus::invoke(&mut app, &ctx, "view.theme.toggle", json!({})).unwrap();
+            assert_eq!(app.session.prefs.appearance.appearance_mode, mode);
+            assert_eq!(app.ui.theme, shown, "{mode}");
+            assert_eq!(app.tokens.kind, shown);
+            assert_eq!(app.session.prefs.appearance.dark_theme, "darker");
+            assert_eq!(app.session.prefs.appearance.light_theme, "light");
+        }
+    }
+
+    /// Sync with System follows the host's answer (the Linux portal) when it changes, and falls
+    /// back to Dark when nothing reports a system appearance.
+    #[test]
+    fn auto_follows_a_stubbed_system_theme() {
+        use std::sync::{Arc, Mutex};
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let system = Arc::new(Mutex::new(Some(egui::Theme::Light)));
+        let read = Arc::clone(&system);
+        app.hooks.system_theme = Some(Box::new(move |_| *read.lock().unwrap_or_else(std::sync::PoisonError::into_inner)));
+        app.set_pref("appearance.appearanceMode", json!("auto")).unwrap();
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.theme, ThemeKind::Light);
+        *system.lock().unwrap() = Some(egui::Theme::Dark);
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.theme, ThemeKind::Dark, "a system change applies without a settings change");
+        *system.lock().unwrap() = None;
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.theme, ThemeKind::Dark);
+        // A fixed mode ignores the system.
+        *system.lock().unwrap() = Some(egui::Theme::Light);
+        app.set_pref("appearance.appearanceMode", json!("dark")).unwrap();
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.theme, ThemeKind::Dark);
+    }
+
+    /// Sync with System leaves egui's theme preference at System, so egui never gives the native
+    /// window an appearance of its own (on macOS that stops system appearance changes reaching
+    /// the app, #642); egui's light and dark styles both carry the resolved theme. Fixed modes
+    /// pin the window to their family.
+    #[test]
+    fn auto_mode_leaves_the_native_window_following_the_system() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.hooks.system_theme = Some(Box::new(|_| Some(egui::Theme::Light)));
+        app.set_pref("appearance.appearanceMode", json!("auto")).unwrap();
+        app.apply_prefs(&ctx);
+        assert_eq!(app.ui.theme, ThemeKind::Light);
+        assert_eq!(ctx.options(|o| o.theme_preference), egui::ThemePreference::System);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            assert_eq!(ctx.style_of(theme).visuals.panel_fill, app.tokens.panel_bg, "{theme:?}");
+        }
+        // egui asks the window to follow the system, never to take Light or Dark.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+        out.textures_delta.clear();
+        let cmds = out.viewport_output.values().flat_map(|v| v.commands.iter()).collect::<Vec<_>>();
+        assert!(!cmds.iter().any(|c| matches!(c, egui::ViewportCommand::SetTheme(t) if t != &egui::SystemTheme::SystemDefault)), "{cmds:?}");
+        for (mode, pref) in [("light", egui::ThemePreference::Light), ("dark", egui::ThemePreference::Dark)] {
+            app.set_pref("appearance.appearanceMode", json!(mode)).unwrap();
+            app.apply_prefs(&ctx);
+            assert_eq!(ctx.options(|o| o.theme_preference), pref, "{mode}");
+            assert_eq!(ctx.global_style().visuals.panel_fill, app.tokens.panel_bg, "{mode}");
+        }
+    }
+
+    /// Picking a theme (`view.theme.*`, `ui.set {theme}`) fixes the mode to its family.
+    #[test]
+    fn picking_a_theme_fixes_its_mode() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.set_pref("appearance.appearanceMode", json!("auto")).unwrap();
+        menus::invoke(&mut app, &ctx, "view.theme.light", json!({})).unwrap();
+        assert_eq!(app.session.prefs.appearance.appearance_mode, "light");
+        assert_eq!(app.ui.theme, ThemeKind::Light);
+        menus::invoke(&mut app, &ctx, "view.theme.darker", json!({})).unwrap();
+        assert_eq!(app.session.prefs.appearance.appearance_mode, "dark");
+        assert_eq!(app.session.prefs.appearance.dark_theme, "darker");
+        assert_eq!(app.ui.theme, ThemeKind::Darker);
+    }
+}
+
+/// winit's Android backend reports no modifier state at all: it ignores the meta state Android
+/// carries on every `KeyEvent` and never emits the `ModifiersChanged` event egui-winit learns
+/// `Ctrl`/`Shift`/`Alt` from, so every chord — Undo, Save, the panel shortcuts — sees empty
+/// modifiers and never matches. Track the modifier keys from the key events themselves, in the
+/// order they happen inside the frame, stamp them onto the frame's key events, and announce the
+/// result to egui with a `ModifiersChanged` of its own before any widget runs.
+///
+/// Called only on Android, from `raw_input_hook`; everywhere else winit reports the real
+/// modifiers, which this would only duplicate. `held` is the app's cross-frame copy, cleared by
+/// a lost focus so a modifier held while the app is backgrounded cannot stick. The frame's own
+/// `ModifiersChanged` describes the end of the frame; the per-event stamps carry the exact
+/// moment, which is what chord matching reads.
+///
+/// Ported from FilmCraft's Android input fix (`47f202cb` + `ecea29d6` in
+/// `Kaedo17/filmcraft-mobile`), where it was validated on hardware first.
+#[cfg(any(target_os = "android", test))]
+fn stamp_android_modifiers(events: &mut Vec<egui::Event>, held: &mut egui::Modifiers) {
+    for event in events.iter_mut() {
+        match event {
+            // A lost focus clears the tracked state, so a modifier held while the app is
+            // backgrounded cannot stick.
+            egui::Event::WindowFocused(false) => *held = egui::Modifiers::NONE,
+            egui::Event::Key { key: egui::Key::ControlLeft | egui::Key::ControlRight, pressed, .. } => {
+                held.ctrl = *pressed;
+                // As egui-winit itself does on every platform but macOS: the command
+                // shortcut is Ctrl, and COMMAND chords need `command` set.
+                held.command = *pressed;
+            }
+            egui::Event::Key { key: egui::Key::ShiftLeft | egui::Key::ShiftRight, pressed, .. } => held.shift = *pressed,
+            egui::Event::Key { key: egui::Key::AltLeft | egui::Key::AltRight, pressed, .. } => held.alt = *pressed,
+            // The wheel and the buttons carry their own modifiers too (Alt/Ctrl + wheel and
+            // Ctrl + click read them), and egui-winit fills them from its own state — always
+            // empty here. Stamp them with what was held when they fired.
+            egui::Event::Key { modifiers, .. } => *modifiers = *held,
+            egui::Event::MouseWheel { modifiers, .. } | egui::Event::PointerButton { modifiers, .. } => {
+                *modifiers = *held;
+            }
+            _ => {}
+        }
+    }
+    // `held.command` mirrors ctrl here (COMMAND chords match). Appended last: egui applies
+    // `ModifiersChanged` events in order, so the frame-level modifiers end up as this frame's
+    // end state — not a stale value left in eframe's pending input buffer from an earlier frame.
+    events.push(egui::Event::ModifiersChanged(*held));
+}
+
+#[cfg(test)]
+mod android_modifier_tests {
+    use egui::{Event, Key, Modifiers};
+
+    fn key(key: Key, pressed: bool) -> Event {
+        Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    fn stamp(events: Vec<Event>) -> (Vec<Event>, Modifiers) {
+        let mut events = events;
+        let mut held = Modifiers::NONE;
+        super::stamp_android_modifiers(&mut events, &mut held);
+        (events, held)
+    }
+
+    /// The modifiers each key event of the frame carries, in order.
+    fn stamped(events: &[Event]) -> Vec<Modifiers> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ctrl_chord_gets_the_command_modifiers() {
+        let (events, held) = stamp(vec![key(Key::ControlLeft, true), key(Key::S, true)]);
+        // The Ctrl press itself is left alone; the S press under it carries Ctrl…
+        assert_eq!(stamped(&events), vec![Modifiers::NONE, Modifiers { ctrl: true, command: true, ..Modifiers::NONE }]);
+        assert!(held.ctrl && held.command);
+    }
+
+    #[test]
+    fn a_released_ctrl_ends_the_chord_within_the_frame() {
+        let ctrl = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
+        let (events, held) = stamp(vec![key(Key::Z, true), key(Key::ControlLeft, true), key(Key::Z, true), key(Key::ControlRight, false), key(Key::Z, true)]);
+        // Five key events, none of the modifier presses/releases stamped: the Z under Ctrl
+        // carries the chord, the Z after the release does not.
+        assert_eq!(stamped(&events), vec![Modifiers::NONE, Modifiers::NONE, ctrl, Modifiers::NONE, Modifiers::NONE]);
+        assert_eq!(held, Modifiers::NONE);
+    }
+
+    #[test]
+    fn shift_and_alt_are_tracked() {
+        let both = Modifiers { shift: true, alt: true, ..Modifiers::NONE };
+        let (events, held) = stamp(vec![key(Key::ShiftLeft, true), key(Key::AltRight, true), key(Key::F5, true)]);
+        assert_eq!(stamped(&events)[2], both);
+        assert_eq!(held, both);
+    }
+
+    #[test]
+    fn a_lost_focus_clears_a_stuck_modifier() {
+        let (events, held) = stamp(vec![key(Key::ControlLeft, true), Event::WindowFocused(false), key(Key::S, true)]);
+        // stamped() only collects key events: the Ctrl press, then the S press after the focus loss.
+        assert_eq!(stamped(&events)[1], Modifiers::NONE, "no chord may survive a focus loss");
+        assert_eq!(held, Modifiers::NONE);
+    }
+
+    #[test]
+    fn the_frame_announces_its_end_state() {
+        let (events, _) = stamp(vec![key(Key::ControlLeft, true)]);
+        assert!(matches!(events.last(), Some(Event::ModifiersChanged(m)) if m.ctrl && m.command));
+        let (events, _) = stamp(vec![]);
+        assert!(matches!(events.last(), Some(Event::ModifiersChanged(m)) if *m == Modifiers::NONE));
+    }
+
+    #[test]
+    fn stamped_modifiers_match_the_binding_patterns() {
+        // What the shortcut pass then does with them: Ctrl+S matches a COMMAND binding and not
+        // a plain-key one, and an unmodified key the other way around.
+        let (events, _) = stamp(vec![key(Key::ControlLeft, true), key(Key::S, true)]);
+        let chord = stamped(&events)[1];
+        assert!(chord.matches_logically(Modifiers::COMMAND));
+        assert!(!chord.matches_logically(Modifiers::NONE));
+        let (events, _) = stamp(vec![key(Key::Z, true)]);
+        let plain = stamped(&events)[0];
+        assert!(plain.matches_logically(Modifiers::NONE));
+        assert!(!plain.matches_logically(Modifiers::COMMAND));
+    }
+
+    #[test]
+    fn wheel_and_click_carry_the_held_modifiers() {
+        let ctrl = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
+        let wheel =
+            Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE };
+        let click = Event::PointerButton { pos: egui::pos2(10.0, 10.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
+        let (events, _) = stamp(vec![key(Key::ControlLeft, true), wheel, click]);
+        // Alt + wheel zoom and Ctrl + click read the event's own modifiers, never the frame's.
+        assert_eq!(events[1], wheel_modifiers(ctrl), "the wheel under Ctrl carries the chord");
+        assert_eq!(events[2], click_modifiers(ctrl), "a click under Ctrl carries the chord");
+    }
+
+    fn wheel_modifiers(m: Modifiers) -> Event {
+        Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: m }
+    }
+
+    fn click_modifiers(m: Modifiers) -> Event {
+        Event::PointerButton { pos: egui::pos2(10.0, 10.0), button: egui::PointerButton::Primary, pressed: true, modifiers: m }
+    }
+}
+>>>>>>> 10410ff0 (android: the in-app file browser, shared storage and the picker view sizes)
