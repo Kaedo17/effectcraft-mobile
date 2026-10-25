@@ -452,10 +452,14 @@ fn run_inner(
                 if let Some(base) = android_files {
                     app.hooks.app_files_dir = Some(base);
                 }
-                if let Some(root) = android_shared {
-                    app.hooks.shared_storage_root = Some(root);
-                }
                 if let Some(a) = access {
+                    // The shared root joins the grant hooks: with them absent (Android 10's
+                    // decline in `capture`, or a JVM the app could not reach) the browser
+                    // would list a root it cannot read inside, next to a grant prompt
+                    // nothing answers.
+                    if let Some(root) = android_shared {
+                        app.hooks.shared_storage_root = Some(root);
+                    }
                     app.hooks.shared_storage_granted = Some(a.granted);
                     app.hooks.shared_storage_grant = Some(a.ask);
                 }
