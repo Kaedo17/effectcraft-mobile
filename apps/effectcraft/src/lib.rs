@@ -1,6 +1,6 @@
 //! EffectCraft app library: the window, hooks and launch logic shared by the desktop
 //! binary (`main.rs`, whose `main` calls [`run`]) and Android's NativeActivity entry point
-//! (`apps/effectcraft-android`, whose `android_main` calls [`run`]).
+//! (`apps/effectcraft-android`, whose `android_main` calls `run_android`).
 //!
 //! Usage: `effectcraft [--control <port>] [--demo|--empty|--home] [--] [project.ecproj | media files…]`
 //!
