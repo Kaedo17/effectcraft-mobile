@@ -462,9 +462,12 @@ fn audio_backend_hint(found: bool) -> Result<(), String> {
 
 /// `cargo xtask ci` builds the desktop app on the host, so on Linux it needs ALSA headers to be
 /// present. Checking here turns a late, confusing link error into one line naming the package.
+/// The probe reads `PKG_CONFIG` first, like the pkg-config crate alsa-sys goes through: the
+/// variable may name a working pkg-config that is not on `PATH`, and the build would use it too.
 #[cfg(target_os = "linux")]
 fn audio_backend() -> Result<(), String> {
-    let found = Command::new("pkg-config").args(["--exists", "alsa"]).status().map(|s| s.success()).unwrap_or(false);
+    let program = std::env::var_os("PKG_CONFIG").unwrap_or_else(|| "pkg-config".into());
+    let found = Command::new(program).args(["--exists", "alsa"]).status().map(|s| s.success()).unwrap_or(false);
     audio_backend_hint(found)
 }
 
