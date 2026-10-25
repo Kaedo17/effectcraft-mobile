@@ -1366,6 +1366,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-android"
+version = "0.16.0"
+dependencies = [
+ "android-activity",
+ "effectcraft",
+ "jni 0.21.1",
+ "log",
+]
+
+[[package]]
 name = "effectcraft-automation"
 version = "0.18.0"
 dependencies = [
