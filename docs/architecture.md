@@ -47,9 +47,9 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
 | L5 | `ui-egui` | The desktop interface: docking, panels, viewer, timeline, graph editor, dialogs, control channel |
 | L5 | `automation` | The MCP server, headless or bridged to the running app |
+urs
 | L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)) |
-
-Allowed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
+ed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
 `media / expr / export / gpu → render`, `export → media`, `lottie → format`, `host → engine, script`,
 `script → engine`.
 
@@ -66,7 +66,31 @@ focused control into view. Active composition breadcrumbs use the selected-row t
 The `viewer_geometry` tests inspect actual painted contrast, scroll geometry and pointer/keyboard
 reachability across the three themes.
 
-## 2. Time
+wo layers make a physical keyboard and mouse usable on Android. winit 0.30.13 (the last 0.30
+release, pinned by eframe 0.36) reports no modifier state there — it ignores the meta state the OS
+carries on every key event and never emits the `ModifiersChanged` egui-winit learns `Ctrl`/`Shift`/
+`Alt` from — and drops every motion action that is not a touch, so a mouse has no hover, no wheel
+and no right or middle button. The workspace therefore vends winit with that mouse path filled in
+([third_party/winit](../third_party/winit/README.md): one Android-only file, pinned by
+`[patch.crates-io]`; every other target compiles the published crate byte-for-byte) and stamps the
+modifier keys onto each frame's key events itself (`stamp_android_modifiers` in `ui-egui`, driven
+from `raw_input_hook` after the frame's events are gathered, before egui builds its input state).
+The stamping also keeps a chord from degrading into its plain-key binding: without it a chord's
+letter arrives unmodified and fires whatever that plain key is bound to — the Zoom tool for `Z` —
+so the chord itself never runs. The vendored mouse path also matches Android's scroll direction on
+the horizontal axis (the OS's `Hscroll` runs the other way round from winit's positive `x`) and
+reports a held button once, deduplicating the events of a device that repeats `Down` while held
+and also sends `ButtonPress` for the same press. Touch and touch-dragged stylus input keeps the
+untouched `Touch` path there. The app side makes the chrome reachable under a finger as well:
+panel content drags like a wheel does, the drawn scroll bar's hit area widens beyond its 6-point
+line, and the dock's resize gutters stop eating the panel scroll drag; and `touch_scroll_target`
+re-applies egui's scroll-bar width at 24 points every frame on a touch screen (or on Android), so
+a theme change that rebuilds the styles can't drop the widening
+(`a_touch_screen_widens_the_scroll_bar_target`). The same two layers were validated first on
+FilmCraft's Android port (filmcraft `47f202cb`, `ecea29d6`, `685c9cc3`), and the scroll-bar work
+on PhotoCraft's (PhotoCraft #6931).
+
+Time
 
 All time is an integer `Tick`, 254 016 000 000 per second, the least common multiple of every
 broadcast frame rate (×1001) and audio sample rate, so frame and sample positions are exact.
@@ -720,6 +744,7 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
+urs
+-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
 
 PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.
