@@ -33,6 +33,10 @@ const PACKAGE: &str = "ai.storyteller.effectcraft";
 pub struct AndroidAccess {
     vm: *mut jni::sys::JavaVM,
     activity: jni::sys::jobject,
+    /// `Build.VERSION.SDK_INT`, read once at [`capture`]: the level never changes while the
+    /// app runs, so the per-frame grant check (`shared_storage_granted`) matches the cached
+    /// one instead of opening a new JNI session to ask again on every frame.
+    sdk_level: Option<i32>,
 }
 
 // SAFETY: both pointers belong to the activity and are never freed while the app runs, which is
@@ -56,8 +60,9 @@ pub fn capture(app: &android_activity::AndroidApp) -> Option<AndroidAccess> {
     // — so the legacy permission the code below checks and asks for is a lie there: it may be
     // grantable and still open nothing past the filter. Decline the whole capability on that one
     // version; the browser keeps its app-private root (which everything else continues to use).
-    let access = AndroidAccess { vm, activity };
-    if access.sdk() == Some(29) {
+    let access = AndroidAccess { vm, activity, sdk_level: None };
+    let access = AndroidAccess { sdk_level: access.sdk(), ..access };
+    if access.sdk_level == Some(29) {
         log::info!(
             "android access: Android 10 enforces scoped storage for this app and the legacy opt-out is not in the manifest; the browser keeps its app-private root"
         );
@@ -102,7 +107,8 @@ impl AndroidAccess {
         Ok(true)
     }
 
-    /// The API level (`Build.VERSION.SDK_INT`), `None` when the JVM could not answer.
+    /// The API level (`Build.VERSION.SDK_INT`), `None` when the JVM could not answer. Read
+    /// once, from [`capture`], which caches it on [`AndroidAccess`].
     fn sdk(self) -> Option<i32> {
         self.with_env(|env| env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?.i())
     }
@@ -112,20 +118,25 @@ impl AndroidAccess {
     /// `capture` returned `None` there, so no `AndroidAccess` exists to call this). `false`
     /// when unknown (the browser then keeps its app-private root).
     pub fn shared_storage_granted(self) -> bool {
-        match self.sdk() {
+        match self.sdk_level {
             // `Environment.isExternalStorageManager()` exists only on API 30+.
             Some(sdk) if sdk >= 30 => {
                 self.with_env(|env| env.call_static_method("android/os/Environment", "isExternalStorageManager", "()Z", &[])?.z()).unwrap_or(false)
             }
             // Android 9: the legacy runtime permission, which still unlocks the whole tree there
             // (scoped storage arrived with Android 10, whose capability is declined in
-            // `capture`).
+            // `capture`). The query runs inside a local frame because this thread stays
+            // attached to the JVM for good (android-activity attached it before
+            // `android_main`): the permission string the check builds would otherwise be a
+            // retained local reference on every frame the browser asks.
             Some(_) => self
                 .with_env(|env| -> jni::errors::Result<bool> {
-                    let perm = env.new_string("android.permission.WRITE_EXTERNAL_STORAGE")?;
-                    let act = self.activity();
-                    let code = env.call_method(&act, "checkSelfPermission", "(Ljava/lang/String;)I", &[JValue::Object(&perm)])?.i()?;
-                    Ok(code == 0)
+                    env.with_local_frame(16, |env| -> jni::errors::Result<bool> {
+                        let perm = env.new_string("android.permission.WRITE_EXTERNAL_STORAGE")?;
+                        let act = self.activity();
+                        let code = env.call_method(&act, "checkSelfPermission", "(Ljava/lang/String;)I", &[JValue::Object(&perm)])?.i()?;
+                        Ok(code == 0)
+                    })
                 })
                 .unwrap_or(false),
             None => false,
@@ -137,7 +148,7 @@ impl AndroidAccess {
     /// visit, so the answer needs no callback). Best effort: a device that refuses the intent or
     /// an unreachable JVM just leaves the grant un-granted, logged.
     pub fn ask_shared_storage_grant(self) {
-        let asked = match self.sdk() {
+        let asked = match self.sdk_level {
             Some(sdk) if sdk >= 30 => self.with_env(|env| -> jni::errors::Result<bool> {
                 // uri = Uri.parse("package:<pkg>")
                 let uri_text = format!("package:{PACKAGE}");
