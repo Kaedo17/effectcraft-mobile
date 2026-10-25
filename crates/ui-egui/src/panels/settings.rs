@@ -764,8 +764,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 if let Some(f) = picked {
                     let _ = app.session.prefs.set(&k, json!(f));
                     app.session.prefs_changed();
-                } else if !opened {
-                    // A button that does nothing reads as broken; say why instead.
+                } else if !opened && app.hooks.pick_open_project.is_none() {
+                    // A button that reads broken only when nothing could open: the in-app
+                    // browser above, or the desktop hook. A cancel inside a dialog that did
+                    // open is the user's answer, not a broken button.
                     app.ui.status = tr("No file dialog is available here; type the path instead.").to_string();
                 }
             }
