@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use android_activity::input::{Axis, Button, InputEvent, KeyAction, Keycode, MotionAction, MotionEvent, Source};
+use android_activity::input::{Axis, InputEvent, KeyAction, Keycode, MotionAction, MotionEvent, Source};
 use android_activity::{
     AndroidApp, AndroidAppWaker, ConfigurationRef, InputStatus, MainEvent, Rect,
 };
@@ -192,6 +192,30 @@ fn button_in_state(motion_event: &MotionEvent<'_>) -> Option<event::MouseButton>
     } else {
         None
     }
+}
+
+/// The button a `ButtonPress`/`ButtonRelease` just changed, without Android's
+/// `AMotionEvent_getActionButton` (API 33+, and the one symbol whose unconditional reference
+/// made this library fail to load on older Android at all): the change is equally visible in
+/// the button *state* (`AMotionEvent_getButtonState`, every Android), which reflects it — a
+/// press lists the button, a release omits it — so the changed button is the one whose state
+/// disagrees with `reported`, the buttons we have already dispatched. `None` when there is
+/// nothing to change: the state matches exactly what we have reported (a first press doubled
+/// as a `ButtonPress`, or a release the `Up` handled first), and only buttons in the state
+/// beyond ours are skipped (stylus buttons, whose pointers never route here anyway).
+fn changed_button_in_state(reported: u8, motion_event: &MotionEvent<'_>) -> Option<event::MouseButton> {
+    use event::MouseButton;
+    let state = motion_event.button_state();
+    [
+        (state.primary(), MouseButton::Left),
+        (state.secondary(), MouseButton::Right),
+        (state.teriary(), MouseButton::Middle),
+        (state.back(), MouseButton::Back),
+        (state.forward(), MouseButton::Forward),
+    ]
+    .into_iter()
+    .find(|(down, button)| *down != (reported & mouse_button_bit(*button) != 0))
+    .map(|(_, button)| button)
 }
 
 impl<T: 'static> EventLoop<T> {
@@ -579,18 +603,22 @@ impl<T: 'static> EventLoop<T> {
                 // the gesture arrives as `Down`/`Up` instead (below); some devices report that
                 // first press here as well, which must not become a second press (egui would see
                 // two `Pressed` with no release between).
-                let button = match motion_event.action_button() {
-                    Button::Primary => MouseButton::Left,
-                    Button::Secondary => MouseButton::Right,
-                    Button::Tertiary => MouseButton::Middle,
-                    Button::Back => MouseButton::Back,
-                    Button::Forward => MouseButton::Forward,
-                    _ => return InputStatus::Unhandled,
-                };
                 if let Some(position) = position {
                     dispatch(WindowEvent::CursorMoved { device_id, position });
                 }
                 let pressed = motion_event.action() == MotionAction::ButtonPress;
+                // The changed button is read from the button *state* against what we have
+                // reported rather than from Android's `AMotionEvent_getActionButton`: that
+                // symbol exists only from API 33, and a static reference to it stops the whole
+                // library loading on older devices (`dlopen failed: cannot locate symbol`, seen
+                // as an Android 12 tablet failing with `UnsatisfiedLinkError`). `None` means the
+                // state already matches what we reported: nothing changed (the doubled first
+                // press, or a release an `Up` has already handled), and nothing is dispatched.
+                let Some(button) =
+                    changed_button_in_state(self.mouse_buttons.get(), motion_event)
+                else {
+                    return InputStatus::Handled;
+                };
                 if self.set_mouse_button(button, pressed) {
                     let state = if pressed { ElementState::Pressed } else { ElementState::Released };
                     dispatch(WindowEvent::MouseInput { device_id, state, button });

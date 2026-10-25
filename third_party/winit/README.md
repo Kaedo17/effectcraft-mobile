@@ -21,8 +21,16 @@ patch adds one method, `EventLoop::dispatch_mouse_input`, and one call to it:
 - `Scroll` becomes `MouseWheel { delta: LineDelta(-h, v) }` from the event's `Hscroll`/`Vscroll`
   axes (Android's horizontal axis scrolls the viewport the other way round from winit's positive
   `x`; the vertical one already matches);
-- `ButtonPress`/`ButtonRelease` become `MouseInput` for the button in `action_button()` (right,
+- `ButtonPress`/`ButtonRelease` become `MouseInput` for the button they changed (right,
   middle, back, forward, and primary if a device sends it that way), preceded by a `CursorMoved`;
+  the button is read from the button state against what this loop has reported (in
+  `changed_button_in_state`), *not* from Android's `AMotionEvent_getActionButton`: that symbol
+  exists only from API 33 and a static reference to it keeps the whole library from loading on
+  older devices — the published crate's `action_button()` call (winit's own and
+  android-activity's) repeats this on Android 13+, where it was never noticed. A press lists
+  the button in the state, a release omits it, and the state of the untouched double-report
+  case (a device reporting the gesture's first press as `Down` *and* `ButtonPress`) agrees
+  with what is already reported, so the semantics are the same as an `action_button()` read;
 - the button that *starts* a gesture arrives as an ordinary `Down`/`Up` (per Android's
   button-event rules): `Down` is reported as the button in the event's `button_state()` (a
   touchpad tap has none, and is the primary button), and `Up`, whose state is already cleared, as
