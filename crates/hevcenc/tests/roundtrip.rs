@@ -142,8 +142,11 @@ fn hevc_decoder_available() -> bool {
         .map(|o| {
             String::from_utf8_lossy(&o.stdout).lines().any(|l| {
                 // Decoder rows look like ` V....D hevc ...`; match the codec name, not the text.
+                // Every row of `-decoders` is a decoder, so the flags column says nothing about
+                // that — its trailing `D` is "supports direct rendering method 1", which a
+                // build's hevc decoder may well lack (requiring it would skip a working oracle).
                 let mut it = l.split_whitespace();
-                it.next().is_some_and(|f| f.contains('D')) && it.next() == Some("hevc")
+                it.next().is_some() && it.next() == Some("hevc")
             })
         })
         .unwrap_or(false)

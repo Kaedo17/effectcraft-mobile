@@ -38,7 +38,11 @@ patch adds one method, `EventLoop::dispatch_mouse_input`, and one call to it:
   device that also sends `ButtonPress`/`ButtonRelease` for the first button does not look like a
   double click;
 - `Move`/`HoverMove` become `CursorMoved`, `HoverEnter`/`HoverExit` become
-  `CursorEntered`/`CursorLeft`, so the cursor tracks the mouse without a press.
+  `CursorEntered`/`CursorLeft`, so the cursor tracks the mouse without a press;
+- `Cancel`, and the loop's `MainEvent::LostFocus`, release every button still reported down
+  (Android ends the gesture without an `Up` when the system takes it over, and a press that
+  ran into losing the window never sees its `Up`) — a button left down would make egui drag
+  forever and suppress its next press.
 
 Which button a `Down` reported is remembered (a bitmask on the event loop), so `Up` releases the
 same button(s) even though Android has cleared its state by then, and no button is reported twice.

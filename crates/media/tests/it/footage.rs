@@ -48,10 +48,11 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     ffmpeg_fixture_inner(name, args, true)
 }
 
-/// Like [`ffmpeg_fixture`] for a fixture only one test wants, which this build of ffmpeg may not
-/// be able to make at all: H.264 High 4:2:2 10-bit needs `libx264`, and distro "free" builds often
-/// ship without it. Such a test skips with a note rather than failing on the packager's choice of
-/// ffmpeg, the same way every test here skips when ffmpeg is missing altogether.
+/// Like [`ffmpeg_fixture`] for a fixture this build of ffmpeg may fail to make: an encoder found
+/// in the `-encoders` listing can still not run here (the hardware backends need their device,
+/// Fedora's `libopenh264` is the `noopenh264` stub), and fixtures built from one, like
+/// [`h264_mp4`], should skip with a note rather than fail on the packager's choice of ffmpeg —
+/// the same way every test here skips when ffmpeg is missing altogether.
 fn try_ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     ffmpeg_fixture_inner(name, args, false)
 }
@@ -86,8 +87,10 @@ fn ffmpeg_fixture_inner(name: &str, args: &[&str], must_succeed: bool) -> Option
 }
 
 fn h264_mp4() -> Option<PathBuf> {
+    // Made with whatever encoder this build has listed: a listed encoder can still fail at run
+    // time (the hardware ones without their device), so this may skip rather than fail.
     let enc = h264_encoder()?;
-    ffmpeg_fixture(
+    try_ffmpeg_fixture(
         "testsrc2_1080p.mp4",
         &[
             "-f",
@@ -319,8 +322,10 @@ fn h264_audio_samples() {
 /// H.264 + AAC at 44.1 kHz in MP4 (ffmpeg writes an edit list that skips the AAC priming):
 /// 440 Hz left, a 200 → 1000 Hz sweep right, 29.97 fps.
 fn aac_44k_mp4() -> Option<PathBuf> {
+    // Made with whatever encoder this build has listed: a listed encoder can still fail at run
+    // time (the hardware ones without their device), so this may skip rather than fail.
     let enc = h264_encoder()?;
-    ffmpeg_fixture(
+    try_ffmpeg_fixture(
         "aac_44k.mp4",
         &[
             "-f",

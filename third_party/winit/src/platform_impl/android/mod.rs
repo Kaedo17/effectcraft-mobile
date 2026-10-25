@@ -303,6 +303,25 @@ impl<T: 'static> EventLoop<T> {
                         },
                         self.window_target(),
                     );
+                    // A button the pointer held into losing the window (a system gesture, the
+                    // app switcher) never sees its `Up`: release the buttons, or egui keeps
+                    // the drag going and their next press reports nothing (`set_mouse_button`
+                    // sees no change). The device id is unknown here, and egui does not key
+                    // pressed buttons on it.
+                    let device_id = event::DeviceId(DeviceId(0));
+                    for button in self.take_mouse_buttons() {
+                        callback(
+                            event::Event::WindowEvent {
+                                window_id: window::WindowId(WindowId),
+                                event: event::WindowEvent::MouseInput {
+                                    device_id,
+                                    state: event::ElementState::Released,
+                                    button,
+                                },
+                            },
+                            self.window_target(),
+                        );
+                    }
                 },
                 MainEvent::ConfigChanged { .. } => {
                     let monitor = MonitorHandle::new(self.android_app.clone());
@@ -657,8 +676,17 @@ impl<T: 'static> EventLoop<T> {
                 }
             },
             MotionAction::HoverExit => dispatch(WindowEvent::CursorLeft { device_id }),
-            // Nothing else a mouse reports needs translating here (Cancel is meaningless for
-            // the buttons, and pointer-id actions belong to touch).
+            MotionAction::Cancel => {
+                // The system took the gesture over (home, the notification shade, another
+                // activity, ...): its buttons end here without an `Up`, and must not stay
+                // reported down — a later press would dispatch nothing (`set_mouse_button`
+                // sees no change of state).
+                for button in self.take_mouse_buttons() {
+                    dispatch(WindowEvent::MouseInput { device_id, state: ElementState::Released, button });
+                }
+            },
+            // Nothing else a mouse reports needs translating here (pointer-id actions belong
+            // to touch).
             _ => return InputStatus::Unhandled,
         }
         InputStatus::Handled

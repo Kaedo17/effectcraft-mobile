@@ -47,7 +47,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
 | L5 | `ui-egui` | The desktop interface: docking, panels, viewer, timeline, graph editor, dialogs, control channel |
 | L5 | `automation` | The MCP server, headless or bridged to the running app |
-| L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web`, `effectcraft-android` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)); Android's NativeActivity entry trampoline (arm64 APK, in-app save/open/export/folder/import dialogs in app-private storage plus shared storage on Android 9 and older, where the legacy grant still opens it; an overwriting save asks Replace? first; no system picker) |
+| L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web`, `effectcraft-android` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)); Android's NativeActivity entry trampoline (arm64 APK, in-app save/open/export/folder/import dialogs in app-private storage plus shared storage once its access is granted — "All files access" from Android 11, the legacy grant on Android 9 and 10; an overwriting save asks Replace? first; no system picker) |
 
 Allowed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,
 `media / expr / export / gpu → render`, `export → media`, `lottie → format`, `host → engine, script`,

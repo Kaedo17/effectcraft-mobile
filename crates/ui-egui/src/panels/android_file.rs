@@ -44,6 +44,18 @@ pub fn enforce_project_ext(name: &str) -> String {
     if project { name.to_string() } else { format!("{name}.ecproj") }
 }
 
+/// Non-project saves gain the requested extension when the typed name has none of its own, like
+/// a desktop dialog with a filter would (`shot` saved as `Frame.png` becomes `shot.png`): the
+/// commands answering these saves need a file of their format, and a nameless format cannot be
+/// opened or exported by whatever put it there. `None`: no extension asked for.
+fn apply_save_ext(name: &str, ext: Option<&str>) -> String {
+    let own = Path::new(name).extension().and_then(|e| e.to_str()).is_some_and(|e| !e.is_empty());
+    match ext {
+        Some(ext) if !own => format!("{name}.{ext}"),
+        _ => name.to_string(),
+    }
+}
+
 /// The full save path for a save into `dir` answered with `name`.
 pub fn save_path_in(dir: &Path, project: bool, name: &str, fallback: &str) -> PathBuf {
     let mut name = sanitize_name(name, fallback);
@@ -499,13 +511,16 @@ pub fn show(app: &mut crate::EffectcraftApp, ctx: &egui::Context, t: &crate::the
             // A file request always answers through the browser.
             app.dialog_state.android_file.browser = Some(app.dialog_state.android_file.folder.clone().unwrap_or_else(|| base.clone()));
         }
-        crate::FileDialog::Save { default, ext: _, project } => {
+        crate::FileDialog::Save { default, ext, project } => {
             let fallback = Path::new(&default).file_name().and_then(|n| n.to_str()).unwrap_or("Untitled.ecproj").to_string();
+            // The extension a non-project save gains when the typed name has none of its own
+            // ([`apply_save_ext`]; the project dialog adds `.ecproj` in `save_path_in` itself).
+            let ext = (!project && !ext.is_empty()).then_some(ext.as_str());
             let loc = app.dialog_state.android_file.folder.clone().unwrap_or_else(|| save_dir(&base, project));
             // (The tablet's soft keyboard appears when the field is tapped; winit raises the IME.)
             let mut name = std::mem::take(&mut app.dialog_state.android_file.name);
             // The target the pending "Replace?" row is about; a name edited since then re-asks.
-            let target = save_path_in(&loc, project, &name, &fallback);
+            let target = save_path_in(&loc, project, &apply_save_ext(&name, ext), &fallback);
             if app.dialog_state.android_file.replace.as_deref().is_some_and(|pending| pending != target) {
                 app.dialog_state.android_file.replace = None;
             }
@@ -549,7 +564,7 @@ pub fn show(app: &mut crate::EffectcraftApp, ctx: &egui::Context, t: &crate::the
                 app.dialog_state.android_file.browser = Some(loc);
             } else if save {
                 // Recompute from the field as it stands now: the row above is only a hint.
-                let path = save_path_in(&loc, project, &app.dialog_state.android_file.name, &fallback);
+                let path = save_path_in(&loc, project, &apply_save_ext(&app.dialog_state.android_file.name, ext), &fallback);
                 if path.exists() {
                     app.dialog_state.android_file.replace = Some(path);
                 } else {
@@ -925,6 +940,23 @@ mod tests {
         assert_eq!(save_path(base, true, "../x", "F.ecproj"), PathBuf::from("/files/Projects/x.ecproj"));
         assert_eq!(save_path_in(Path::new("/files/Exports/Shots"), false, "Frame.png", "F.png"), PathBuf::from("/files/Exports/Shots/Frame.png"));
         assert_eq!(save_path_in(Path::new("/files/Projects"), true, "Copy", "F.ecproj"), PathBuf::from("/files/Projects/Copy.ecproj"));
+    }
+
+    #[test]
+    fn non_project_saves_gain_the_requested_extension() {
+        // A name typed without one carries the request's extension, like the desktop dialog's
+        // filter; a name that has its own keeps it.
+        assert_eq!(apply_save_ext("shot", Some("png")), "shot.png");
+        assert_eq!(apply_save_ext("Frame", Some("png")), "Frame.png");
+        assert_eq!(apply_save_ext("shot.FINAL", Some("png")), "shot.FINAL");
+        assert_eq!(apply_save_ext("shot", Some("ecproj")), "shot.ecproj");
+        // No extension asked for (or the project save, which adds its own in `save_path_in`).
+        assert_eq!(apply_save_ext("shot", None), "shot");
+        assert_eq!(apply_save_ext("Foam.png", None), "Foam.png");
+        assert_eq!(
+            save_path_in(Path::new("/files/Exports/Shots"), false, &apply_save_ext("shot", Some("png")), "F.png"),
+            PathBuf::from("/files/Exports/Shots/shot.png")
+        );
     }
 
     #[test]
