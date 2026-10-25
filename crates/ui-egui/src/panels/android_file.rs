@@ -217,13 +217,13 @@ fn stored_view(app: &crate::EffectcraftApp) -> PickView {
     }
 }
 
-/// Switch the open picker to `view` and remember it for the next dialog.
+/// Switch the open picker to `view` and remember it for the next dialog — written to
+/// `prefs.json` right away, like the Settings dialog's own writes ([`EffectcraftApp::set_pref`]).
 fn remember_view(app: &mut crate::EffectcraftApp, view: PickView) {
     app.dialog_state.android_file.view = view;
-    if let Err(e) = app.session.prefs.set("general.pickerView", serde_json::json!(view.as_str())) {
+    if let Err(e) = app.set_pref("general.pickerView", serde_json::json!(view.as_str())) {
         log::warn!("picker view: {e}");
     }
-    app.session.prefs_changed();
 }
 
 /// The picker's four view buttons; returns the one tapped this frame (applied after the modal
