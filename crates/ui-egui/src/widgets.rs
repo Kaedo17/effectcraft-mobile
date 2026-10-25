@@ -444,9 +444,12 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     let thumb_len = (len * len / (len + max.max(0.0)).max(1.0)).max(16.0).min(len).max(0.0);
     let travel = (len - thumb_len).max(1.0);
     let thumb_at = |s: f32| track.min[a] + (len - thumb_len) * if max > 0.0 { (s / max).clamp(0.0, 1.0) } else { 0.0 };
-    // The hit a finger lands on: a 4-point track is a 20-point target, each side widened along
-    // the bar's thin axis (#1). A mouse always had this; a touch never could.
-    let hit = track.expand2(if vertical { vec2(8.0, 2.0) } else { vec2(2.0, 8.0) });
+    // The hit a finger lands on: a 4-point track becomes a 20-point target, widened only across
+    // the bar's thin axis (#1). A mouse always had this; a touch never could. The long axis stays
+    // put because it reaches neighbouring UI: a horizontal bar's expanded x would put its hit
+    // directly under the empty list area beside it, and egui's hit test then claims the click for
+    // the drag-only bar and the panel's own right-click menu never opens (kittest caught this).
+    let hit = track.expand2(if vertical { vec2(8.0, 0.0) } else { vec2(0.0, 8.0) });
     let resp = ui.interact(hit, egui::Id::unique(key), Sense::drag());
     let pressed = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.any_pressed());
     let mut s = scroll;
