@@ -4,9 +4,11 @@
 //! app-private directory. To let a save, export, autosave folder, project or media import reach
 //! shared storage (`/storage/emulated/0`), the user must grant "All files access" — a special
 //! permission Android never grants silently: the app can only *check* whether it is held and
-//! *open the screen* where the user toggles it (Android 11+), or show the ordinary runtime
-//! permission dialog (Android 9/10, whose legacy `WRITE_EXTERNAL_STORAGE` still opens the whole
-//! shared tree). That is all this module does — it never reads or writes storage itself, so the
+//! *open the screen* where the user toggles it (Android 11+), or, on Android 9 only, show the
+//! ordinary runtime permission dialog, whose legacy `WRITE_EXTERNAL_STORAGE` still opens the
+//! whole shared tree there (`capture` declines Android 10 outright: scoped storage applies to
+//! this targetSdk 35 app and the legacy opt-out is not in the manifest, so its browser keeps
+//! the app-private root). That is all this module does — it never reads or writes storage itself, so the
 //! browser's own root-clamping still keeps every answer inside the root the user is browsing.
 //!
 //! Every JNI call can fail (no JVM, an API level without the method, a device that refuses the
@@ -106,8 +108,9 @@ impl AndroidAccess {
     }
 
     /// Whether shared storage may be read and written right now: "All files access" on
-    /// Android 11+, the legacy storage permission on Android 9/10. `false` when unknown (the
-    /// browser then keeps its app-private root).
+    /// Android 11+, the legacy storage permission on Android 9 (Android 10 is never asked:
+    /// `capture` returned `None` there, so no `AndroidAccess` exists to call this). `false`
+    /// when unknown (the browser then keeps its app-private root).
     pub fn shared_storage_granted(self) -> bool {
         match self.sdk() {
             // `Environment.isExternalStorageManager()` exists only on API 30+.
