@@ -14,8 +14,8 @@
 //! Android limitations (v1): no system file picker or message dialogs (rfd has no Android
 //! backend), so Save, Open Project, exports, folder picks and media import are served by the
 //! in-app browser — app-private storage always, shared storage (`/storage/emulated/0`) too once
-//! the user grants "All files access" (`android_access`); settings, plug-ins and crash recovery
-//! use app-private storage.
+//! the user grants "All files access" (`android_access`); settings and crash recovery use
+//! app-private storage.
 
 #[cfg(target_os = "android")]
 mod android_access;
