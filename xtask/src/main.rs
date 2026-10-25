@@ -197,13 +197,13 @@ fn sidecar_for(asset: &str) -> String {
 }
 
 /// The asset a sidecar belongs to, mirroring [`sidecar_for`]; `None` when `path` is not a sidecar.
+/// Inside [`ANDROID_RES`] only the dot-prefixed spelling counts — aapt refuses the plain one — so
+/// a plain `<leaf>.attribution` there has no asset and must be reported as a stray.
 fn asset_for(path: &str) -> Option<String> {
     let stem = path.strip_suffix(".attribution")?;
-    if let Some((dir, leaf)) = stem.rsplit_once('/')
-        && stem.starts_with(ANDROID_RES)
-        && leaf.starts_with('.')
-    {
-        return Some(format!("{dir}/{}", &leaf[1..]));
+    if stem.starts_with(ANDROID_RES) {
+        let (dir, leaf) = stem.rsplit_once('/')?;
+        return leaf.strip_prefix('.').map(|leaf| format!("{dir}/{leaf}"));
     }
     Some(stem.to_string())
 }
@@ -245,7 +245,7 @@ fn assets() -> Result<(), String> {
                 errors.push(format!("{f}: sidecar for a file that does not exist"));
             }
             Some(_) => {}
-            None => errors.push(format!("{f}: not an attribution sidecar")),
+            None => errors.push(format!("{f}: not an attribution sidecar (inside {ANDROID_RES} sidecars must be dot-prefixed)")),
         }
     }
     if errors.is_empty() {
@@ -535,6 +535,14 @@ mod tests {
             assert_eq!(asset_for(&side).as_deref(), Some(asset), "{side}");
         }
         assert_eq!(asset_for("README.md"), None);
+    }
+
+    #[test]
+    fn a_plain_sidecar_inside_the_android_res_tree_is_rejected() {
+        // aapt refuses the plain spelling in its resource tree, so a stray plain sidecar there is
+        // exactly what this check must catch — not silently accept as the plain file's sidecar.
+        let stray = format!("{ANDROID_RES}mipmap-mdpi/ic_launcher.png.attribution");
+        assert_eq!(asset_for(&stray), None, "the plain spelling in {ANDROID_RES} must be reported, not accepted");
     }
 
     #[test]
