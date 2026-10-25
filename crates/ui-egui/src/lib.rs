@@ -7,6 +7,8 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(any(target_os = "android", test))]
+mod android_modifiers;
 pub mod audio;
 pub mod automation;
 pub mod bench;
@@ -21,8 +23,6 @@ pub mod gpu_failure;
 pub mod header;
 pub mod i18n;
 pub mod icons;
-#[cfg(any(target_os = "android", test))]
-mod android_modifiers;
 pub mod menu_keys;
 pub mod menus;
 pub mod native_menu;

@@ -51,7 +51,6 @@ fn stamp_android_modifiers(events: &mut Vec<egui::Event>, held: &mut egui::Modif
     events.push(egui::Event::ModifiersChanged(*held));
 }
 
-
 #[cfg(test)]
 mod android_modifier_tests {
     use egui::{Event, Key, Modifiers};
@@ -137,8 +136,13 @@ mod android_modifier_tests {
     #[test]
     fn wheel_and_click_carry_the_held_modifiers() {
         let ctrl = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
-        let wheel =
-            Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE, source: egui::MouseWheelSource::Wheel };
+        let wheel = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+            source: egui::MouseWheelSource::Wheel,
+        };
         let click = Event::PointerButton { pos: egui::pos2(10.0, 10.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
         let (events, _) = stamp(vec![key(Key::ControlLeft, true), wheel, click]);
         // Alt + wheel zoom and Ctrl + click read the event's own modifiers, never the frame's.
@@ -147,7 +151,13 @@ mod android_modifier_tests {
     }
 
     fn wheel_modifiers(m: Modifiers) -> Event {
-        Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, 1.0), phase: egui::TouchPhase::Move, modifiers: m, source: egui::MouseWheelSource::Wheel }
+        Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: m,
+            source: egui::MouseWheelSource::Wheel,
+        }
     }
 
     fn click_modifiers(m: Modifiers) -> Event {
