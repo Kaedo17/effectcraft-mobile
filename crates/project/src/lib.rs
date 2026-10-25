@@ -8,6 +8,7 @@
 
 pub mod build;
 pub mod essential;
+mod file_check;
 pub mod limits;
 pub mod props;
 pub mod render_queue;
@@ -851,7 +852,12 @@ impl Comp {
     /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches, Hide
     /// Shy Layers and the viewer's Resolution.
     pub fn same_pixels(&self, o: &Comp) -> bool {
-        // Every field (no `..`: a new field must be considered here); the layers last.
+        self.same_settings(o) && self.layers.len() == o.layers.len() && self.layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels(b))
+    }
+
+    /// [`Self::same_pixels`] but for the layers.
+    fn same_settings(&self, o: &Comp) -> bool {
+        // Every field (no `..`: a new field must be considered here).
         let Comp {
             width,
             height,
@@ -861,7 +867,7 @@ impl Comp {
             display_start,
             background,
             work_area,
-            layers,
+            layers: _,
             markers,
             shutter_angle,
             shutter_phase,
@@ -903,8 +909,61 @@ impl Comp {
             && *global_light == o.global_light
             && *guides == o.guides
             && *essential == o.essential
-            && layers.len() == o.layers.len()
-            && layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels(b))
+    }
+
+    /// The comp-time span (`in_point..out_point` of every layer changed, added or removed,
+    /// widened by the shutter) outside which `self` draws the same pixels as `o`, so cached
+    /// frames there stay valid (#1641). `None` when the edit can reach any frame: a comp setting,
+    /// a layer reorder, Solo turning on or off, an expression (it reads anything), or a changed
+    /// layer another layer parents to, mattes with or picks in an effect.
+    pub fn changed_span(&self, o: &Comp) -> Option<(Tick, Tick)> {
+        fn reads(g: &PropGroup, changed: &[LayerId]) -> bool {
+            g.children.iter().any(|c| match c {
+                Node::Prop(p) => {
+                    p.expr.is_some()
+                        || std::iter::once(&p.value)
+                            .chain(p.keys.iter().map(|k| &k.value))
+                            .any(|v| matches!(v, Value::Layer(Some(id)) if changed.contains(&LayerId(*id))))
+                }
+                Node::Group(g) => reads(g, changed),
+            })
+        }
+        // Solo hides every other layer at every frame.
+        if !self.same_settings(o) || self.any_solo() != o.any_solo() {
+            return None;
+        }
+        let common = |a: &Comp, b: &Comp| a.layers.iter().map(|l| l.id).filter(|id| b.layer(*id).is_some()).collect::<Vec<_>>();
+        if common(self, o) != common(o, self) {
+            return None;
+        }
+        let mut changed = Vec::new();
+        let mut span: Option<(Tick, Tick)> = None;
+        // Each changed layer comes up from both sides: its old and its new span.
+        for (l, other) in self.layers.iter().map(|l| (l, o.layer(l.id))).chain(o.layers.iter().map(|l| (l, self.layer(l.id)))) {
+            if other.is_some_and(|b| l.same_pixels(b)) {
+                continue;
+            }
+            changed.push(l.id);
+            let (s, e) = (l.in_point.min(l.out_point), l.in_point.max(l.out_point));
+            span = Some(span.map_or((s, e), |(a, b)| (a.min(s), b.max(e))));
+        }
+        let reaches = |l: &Layer| {
+            l.parent.is_some_and(|p| changed.contains(&p)) || l.track_matte.as_ref().is_some_and(|m| changed.contains(&m.layer)) || reads(&l.props, &changed)
+        };
+        if self.layers.iter().chain(&o.layers).any(reaches) {
+            return None;
+        }
+        // A frame at `t` samples cameras, lights and transforms over its shutter,
+        // `t + (phase + angle * 0..=1) / 360` frames, and draws the layers active at `t` itself.
+        let (a, p) = (self.shutter_angle / 360.0, self.shutter_phase / 360.0);
+        let fd = self.frame_duration().seconds();
+        let (before, after) = (Tick::from_seconds_f64(p.max(p + a).max(0.0) * fd), Tick::from_seconds_f64(-p.min(p + a).min(0.0) * fd));
+        span.map(|(s, e)| (s - before, e + after))
+    }
+
+    /// Some layer is soloed: only the soloed layers draw.
+    pub fn any_solo(&self) -> bool {
+        self.layers.iter().any(|l| l.switches.solo && l.source.is_av())
     }
 
     /// Draws the same pixels as `o` once plain markers are ignored: they change no pixels. Protected
@@ -1478,11 +1537,32 @@ impl Project {
     }
     /// Whether comp `inner` is (transitively) nested inside comp `outer` (to prevent cycles).
     pub fn comp_contains(&self, outer: ItemId, inner: ItemId) -> bool {
+        // A walk with a stack and a visited set rather than recursion (#1237): a damaged project
+        // may hold a precomp cycle that doesn't pass `inner` (recursion never ended), a long
+        // chain must not use up the call stack, and comps shared by many paths are visited once
+        // (recursion re-walked them for every path).
         if outer == inner {
             return true;
         }
-        let Some(c) = self.comp(outer) else { return false };
-        c.layers.iter().any(|l| matches!(l.source, LayerSource::Comp { item } if self.comp_contains(item, inner)))
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![outer];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(c) = self.comp(id) else { continue };
+            for l in &c.layers {
+                if let LayerSource::Comp { item } = l.source {
+                    if item == inner {
+                        return true;
+                    }
+                    if !seen.contains(&item) {
+                        stack.push(item);
+                    }
+                }
+            }
+        }
+        false
     }
     /// Make sure `next_id` exceeds every id in the project (after loading or merging).
     pub fn fix_next_id(&mut self) {
@@ -1519,13 +1599,20 @@ impl Project {
             && self.render_prefs == other.render_prefs
     }
     /// The project file's text: the project with the version that wrote it (`savedBy`), checked
-    /// to read back, so a save never writes a file that can't be opened (JSON has no NaN or
-    /// infinity: such a value would be written as `null`).
+    /// to read back, so a save never writes a file that can't be opened. Values JSON can't hold
+    /// (NaN or infinity, written as `null`, and nesting too deep to parse) are refused on every
+    /// save; debug builds also read the text back.
     pub fn to_file_json(&self) -> Result<String, ProjectError> {
         self.to_file_json_with_view(&SavedView::default())
     }
     /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]).
     pub fn to_file_json_with_view(&self, view: &SavedView) -> Result<String, ProjectError> {
+        if self.schema > SCHEMA_VERSION {
+            return Err(ProjectError::Invalid(format!(
+                "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({SCHEMA_VERSION}))",
+                self.schema
+            )));
+        }
         #[derive(Serialize)]
         struct File<'a> {
             #[serde(rename = "savedBy")]
@@ -1535,8 +1622,11 @@ impl Project {
             #[serde(flatten)]
             project: &'a Project,
         }
-        let text = serde_json::to_string_pretty(&File { saved_by: APP_VERSION, view, project: self })
-            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        let file = File { saved_by: APP_VERSION, view, project: self };
+        file_check::check(&file)
+            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
+        let text = serde_json::to_string_pretty(&file).map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        #[cfg(debug_assertions)]
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
         Ok(text)

@@ -24,7 +24,7 @@
 //! them (Info panel, eyedroppers, histograms).
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
@@ -152,6 +152,8 @@ struct Cache {
     gpu_budget: usize,
     /// The playing preview, if any: evictions spare the frames it shows next.
     playhead: Option<Playhead>,
+    /// Scale of the frame on screen (the newest urgent request): frames of other scales go first.
+    scale: Option<u32>,
 }
 
 impl Cache {
@@ -173,8 +175,14 @@ impl Cache {
     /// recently shown of the frames it doesn't reach, then the one it reaches last. Plain LRU
     /// evicted the frames just ahead of the playhead first (rendered a while ago, not shown yet)
     /// to keep the ones just shown, so a preview longer than the cache played into a gap that
-    /// prefetch kept refilling while it evicted the next frames (#595).
+    /// prefetch kept refilling while it evicted the next frames (#595). Frames of another scale
+    /// than the one on screen go first (a zoom or resolution change).
     fn victim(&self) -> Option<usize> {
+        if let Some(s) = self.scale
+            && let Some(i) = self.order.iter().position(|k| k.scale != s)
+        {
+            return Some(i);
+        }
         let Some(p) = &self.playhead else { return (!self.order.is_empty()).then_some(0) };
         let mut farthest: Option<(i64, usize)> = None;
         for (i, k) in self.order.iter().enumerate() {
@@ -186,10 +194,13 @@ impl Cache {
         }
         farthest.map(|(_, i)| i)
     }
-    /// Video memory: drop the oldest GPU frames past their own budget.
+    /// Video memory: drop the oldest GPU frames past their own budget, frames of another scale
+    /// than the one on screen first (a zoom or resolution change).
     fn evict_gpu(&mut self) {
         while self.gpu_bytes > self.gpu_budget {
-            let Some(i) = self.order.iter().position(|k| self.map.get(k).is_some_and(FrameImage::is_gpu)) else { break };
+            let is_gpu = |k: &FrameKey| self.map.get(k).is_some_and(FrameImage::is_gpu);
+            let other_scale = self.order.iter().position(|k| Some(k.scale) != self.scale && is_gpu(k));
+            let Some(i) = other_scale.or_else(|| self.order.iter().position(is_gpu)) else { break };
             if let Some(old) = self.order.remove(i) {
                 self.remove(&old);
             }
@@ -227,6 +238,19 @@ impl Cache {
         }
         self.order.retain(|k| !gone.contains(&k.content));
     }
+    /// Move the frames of identity `from` that `keep` accepts to identity `to` (in place in the
+    /// eviction order), unless `to` already has them.
+    fn carry(&mut self, from: u64, to: u64, keep: impl Fn(i64) -> bool) {
+        for k in self.order.iter_mut().filter(|k| k.content == from && keep(k.frame)) {
+            let moved = FrameKey { content: to, ..*k };
+            if !self.map.contains_key(&moved)
+                && let Some(img) = self.map.remove(k)
+            {
+                self.map.insert(moved, img);
+                *k = moved;
+            }
+        }
+    }
     fn evict_to_budget(&mut self) {
         while self.bytes > self.budget {
             let Some(old) = self.victim().and_then(|i| self.order.remove(i)) else { break };
@@ -258,8 +282,10 @@ pub struct RenderSource {
 /// ([`Frames::identity`]).
 type Identity = (u64, Option<Arc<Project>>);
 
-/// Content keys of (project revision, comp), computed once per revision.
-type ContentKeys = Arc<Mutex<HashMap<(u64, u64), u128>>>;
+/// Content keys of (project revision, comp, virtual-file generation). The generation is one
+/// counter bumped when a browser file is replaced, so a lookup stays a map read. Hashing the
+/// new bytes happens only when that generation misses.
+type ContentKeys = Arc<Mutex<HashMap<(u64, u64, u64), u128>>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
@@ -268,16 +294,16 @@ struct ContentKeyJobs {
     pending: VecDeque<(Arc<Project>, u64, u64)>,
 }
 
-fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64) -> u128 {
-    if let Some(k) = keys.lock().ok().and_then(|m| m.get(&(revision, comp)).copied()) {
+fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64, epoch: u64, virtual_id: Option<disk_cache::VirtualFileId<'_>>) -> u128 {
+    if let Some(k) = keys.lock().ok().and_then(|m| m.get(&(revision, comp, epoch)).copied()) {
         return k;
     }
-    let k = disk_cache::comp_content_key(project, ItemId(comp));
+    let k = disk_cache::comp_content_key_with(project, ItemId(comp), virtual_id);
     if let Ok(mut m) = keys.lock() {
         if m.len() > 256 {
             m.clear();
         }
-        m.insert((revision, comp), k);
+        m.insert((revision, comp, epoch), k);
     }
     k
 }
@@ -288,7 +314,7 @@ fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64) 
 /// hands out), and by value the project settings and the footage, solids and proxies it uses.
 /// With expressions in its comps (which can read anything) every item counts.
 pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
-    comp_content_with(project, comp, |_, c| Arc::as_ptr(c))
+    comp_content_with(project, comp, project, |_, c| c)
 }
 
 /// Whether two versions of a comp draw the same pixels. Markers only count when an expression
@@ -308,8 +334,9 @@ fn project_has_expressions(project: &Project) -> bool {
     project.items.values().any(|i| matches!(&i.kind, ItemKind::Comp(c) if c.layers.iter().any(|l| has_expression(&l.props))))
 }
 
-/// [`comp_content`] with each comp's address given by `addr`.
-fn comp_content_with(project: &Project, comp: ItemId, addr: impl Fn(ItemId, &Arc<Comp>) -> *const Comp) -> u64 {
+/// [`comp_content`] with each comp's version selected for both its sources and its address.
+/// Sources removed by undo are read from `base`.
+fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>) -> u64 {
     use std::hash::{Hash, Hasher};
     fn has_expression(g: &PropGroup) -> bool {
         g.children.iter().any(|c| match c {
@@ -319,6 +346,7 @@ fn comp_content_with(project: &Project, comp: ItemId, addr: impl Fn(ItemId, &Arc
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     format!("{:?}", project.settings).hash(&mut h);
+    let item = |id| project.item(id).or_else(|| base.item(id));
     let mut seen = BTreeSet::new();
     let mut stack = vec![comp];
     let mut expressions = false;
@@ -326,7 +354,8 @@ fn comp_content_with(project: &Project, comp: ItemId, addr: impl Fn(ItemId, &Arc
         if !seen.insert(id) {
             continue;
         }
-        let Some(ItemKind::Comp(c)) = project.item(id).map(|i| &i.kind) else { continue };
+        let Some(ItemKind::Comp(c)) = item(id).map(|i| &i.kind) else { continue };
+        let c = version(id, c);
         for l in &c.layers {
             if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
                 stack.push(item);
@@ -336,14 +365,14 @@ fn comp_content_with(project: &Project, comp: ItemId, addr: impl Fn(ItemId, &Arc
     }
     let ids: Vec<ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
     for id in ids {
-        let Some(it) = project.item(id) else { continue };
+        let Some(it) = item(id) else { continue };
         id.0.hash(&mut h);
         if expressions {
             // (`comp("Name")`, `footage("Name")`)
             it.name.hash(&mut h);
         }
         match &it.kind {
-            ItemKind::Comp(c) => (addr(id, c) as usize).hash(&mut h),
+            ItemKind::Comp(c) => (Arc::as_ptr(version(id, c)) as usize).hash(&mut h),
             k => format!("{k:?}").hash(&mut h),
         }
         format!("{:?}", it.proxy).hash(&mut h);
@@ -363,8 +392,15 @@ pub fn opts_hash(o: &RenderOpts) -> u64 {
 }
 
 /// Disk key of a viewer frame (render options included: region of interest, draft…).
-fn frame_disk_key(keys: &ContentKeys, project: &Project, key: &FrameKey, opts_hash: u64) -> u128 {
-    let content = content_key(keys, project, key.revision, key.comp);
+fn frame_disk_key(
+    keys: &ContentKeys,
+    project: &Project,
+    key: &FrameKey,
+    opts_hash: u64,
+    epoch: u64,
+    virtual_id: Option<disk_cache::VirtualFileId<'_>>,
+) -> u128 {
+    let content = content_key(keys, project, key.revision, key.comp, epoch, virtual_id);
     disk_cache::frame_key(content, key.frame, key.scale, key.view ^ opts_hash)
 }
 
@@ -441,6 +477,10 @@ pub struct Frames {
     /// Render time of the last viewer (urgent) frame in ms, for the Info panel / perf readout.
     pub last_ms: Arc<Mutex<f64>>,
     content_keys: ContentKeys,
+    /// Bumped when a virtual file is replaced. Lookups key on it instead of statting footage.
+    virtual_epoch: Arc<AtomicU64>,
+    /// Size and content hash for paths with no native metadata. Called only on a cache miss.
+    virtual_id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>,
     #[cfg(not(target_arch = "wasm32"))]
     content_key_jobs: Arc<Mutex<ContentKeyJobs>>,
     gpu_retired: Arc<AtomicBool>,
@@ -462,7 +502,7 @@ impl Default for Frames {
         #[cfg(not(target_arch = "wasm32"))]
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 16);
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, playhead: None })),
+            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, playhead: None, scale: None })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(Queue::default())),
             #[cfg(not(target_arch = "wasm32"))]
@@ -477,6 +517,8 @@ impl Default for Frames {
             ctx: None,
             last_ms: Arc::new(Mutex::new(0.0)),
             content_keys: Arc::default(),
+            virtual_epoch: Arc::new(AtomicU64::new(0)),
+            virtual_id: None,
             #[cfg(not(target_arch = "wasm32"))]
             content_key_jobs: Arc::default(),
             gpu_retired: Arc::default(),
@@ -724,12 +766,27 @@ impl Frames {
         let markers_count = project_has_expressions(project);
         if let Some((base_id, base)) = bases.get(&comp.0)
             && *base_id != plain
-            && comp_content_with(project, comp, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || same_pixels(b, c, markers_count) => Arc::as_ptr(b),
-                _ => Arc::as_ptr(c),
+            && comp_content_with(project, comp, project, |id, c| match base.item(id).map(|i| &i.kind) {
+                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || same_pixels(b, c, markers_count) => b,
+                _ => c,
             }) == *base_id
         {
             return (*base_id, Some(base.clone()));
+        }
+        // Only layers of this comp changed: its frames outside their span (and a frame either
+        // side for rounding) keep drawing the same pixels, so a cut or trim recaches only the
+        // layers it touched (#1641).
+        if let Some((base_id, base)) = bases.get(&comp.0)
+            && let (Some(old), Some(new)) = (base.comp(comp), project.comp(comp))
+            && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
+                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || same_pixels(b, c, markers_count) => b,
+                _ => c,
+            }) == *base_id
+            && let Some((s, e)) = new.changed_span(old)
+            && let Ok(mut cache) = self.cache.lock()
+        {
+            let (first, last) = (new.frame_rate.frame_at(s).saturating_sub(1), new.frame_rate.frame_at(e).saturating_add(1));
+            cache.carry(*base_id, plain, |f| f < first || f > last);
         }
         if bases.len() > MAX_KEEPERS {
             bases.clear();
@@ -758,7 +815,12 @@ impl Frames {
     /// Frames of the series of `base` in the disk cache but not in RAM — the blue cache bar.
     /// `opts` are the viewer's render options (part of the disk key). Native queries return
     /// no blue frames until the content key is ready; hashing never blocks timeline painting.
-    pub fn disk_frames(&self, src: &RenderSource, base: &FrameKey, frames: i64, opts: &RenderOpts) -> Vec<i64> {
+    pub fn disk_frames(&self, src: &RenderSource, base: &FrameKey, range: std::ops::Range<i64>, opts: &RenderOpts) -> Vec<i64> {
+        let start = range.start.clamp(0, 100_000);
+        let end = range.end.clamp(0, 100_000);
+        if start >= end {
+            return vec![];
+        }
         let remote = self.remote.as_ref().filter(|r| r.disk());
         let contains = |k: u128| match (&src.disk, remote) {
             (Some(dc), _) => dc.contains(disk_cache::Kind::Frame, k),
@@ -768,9 +830,10 @@ impl Frames {
         if src.disk.is_none() && remote.is_none() {
             return vec![];
         }
+        let epoch = self.virtual_epoch.load(Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
         let content = {
-            let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp)).copied();
+            let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
             let Some(content) = known else {
                 self.request_content_key(src.project.clone(), base.revision, base.comp);
                 return vec![];
@@ -778,13 +841,10 @@ impl Frames {
             content
         };
         #[cfg(target_arch = "wasm32")]
-        let content = content_key(&self.content_keys, &src.project, base.revision, base.comp);
+        let content = content_key(&self.content_keys, &src.project, base.revision, base.comp, epoch, self.virtual_id.as_deref());
         let ram: HashSet<i64> = self.cached_frames(base).into_iter().collect();
         let oh = opts_hash(opts);
-        (0..frames.clamp(0, 100_000))
-            .filter(|f| !ram.contains(f))
-            .filter(|f| contains(disk_cache::frame_key(content, *f, base.scale, base.view ^ oh)))
-            .collect()
+        (start..end).filter(|f| !ram.contains(f)).filter(|f| contains(disk_cache::frame_key(content, *f, base.scale, base.view ^ oh))).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -803,6 +863,7 @@ impl Frames {
         jobs.running = true;
         drop(jobs);
         let (jobs, keys, ctx) = (self.content_key_jobs.clone(), self.content_keys.clone(), self.ctx.clone());
+        let (epoch, id) = (self.virtual_epoch.clone(), self.virtual_id.clone());
         let work = move || loop {
             let next = {
                 let mut jobs = jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -813,7 +874,9 @@ impl Frames {
                 next
             };
             let Some((project, revision, comp)) = next else { return };
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| content_key(&keys, &project, revision, comp))).is_err() {
+            let epoch = epoch.load(Ordering::Relaxed);
+            let id = id.clone();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| content_key(&keys, &project, revision, comp, epoch, id.as_deref()))).is_err() {
                 log::error!("could not compute a preview disk-cache key; the cache indicator will retry");
             }
             if let Some(ctx) = &ctx {
@@ -893,7 +956,19 @@ impl Frames {
     }
 
     fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, urgent: bool) {
-        if self.is_cached(&key) {
+        // The frame on screen sets the scale evictions keep: a prefetch or a passive viewer at
+        // another zoom must not evict the active viewer's frames.
+        let cached = self
+            .cache
+            .lock()
+            .map(|mut c| {
+                if urgent {
+                    c.scale = Some(key.scale);
+                }
+                c.map.contains_key(&key)
+            })
+            .unwrap_or(false);
+        if cached {
             return;
         }
         let Ok(mut q) = self.queue.lock() else { return };
@@ -964,7 +1039,19 @@ impl Frames {
             ctx: self.ctx.clone(),
             last: self.last_ms.clone(),
             content_keys: self.content_keys.clone(),
+            virtual_epoch: self.virtual_epoch.clone(),
+            virtual_id: self.virtual_id.clone(),
             gpu_retired: self.gpu_retired.clone(),
+        }
+    }
+
+    /// Browser file table: `epoch` bumps on each replacement, and `id` is the size and content
+    /// hash used when a content key is rebuilt. Neither runs on a cache hit.
+    pub fn set_virtual_media(&mut self, epoch: Arc<AtomicU64>, id: Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>) {
+        self.virtual_epoch = epoch;
+        self.virtual_id = Some(id);
+        if let Ok(mut keys) = self.content_keys.lock() {
+            keys.clear();
         }
     }
 
@@ -1036,7 +1123,8 @@ impl Frames {
             let fw = self.worker();
             let busy = self.remote_busy.clone();
             let t0 = web_time::Instant::now();
-            let disk_key = remote.disk().then(|| frame_disk_key(&w.content_keys, &job.src.project, &key, opts_hash(&job.opts)));
+            let epoch = w.virtual_epoch.load(Ordering::Relaxed);
+            let disk_key = remote.disk().then(|| frame_disk_key(&w.content_keys, &job.src.project, &key, opts_hash(&job.opts), epoch, w.virtual_id.as_deref()));
             let rj = RemoteJob { project: job.src.project.clone(), revision: key.revision, comp: job.comp, t: job.t, opts: job.opts, disk_key };
             remote.start(
                 rj,
@@ -1093,6 +1181,8 @@ struct Worker {
     ctx: Option<egui::Context>,
     last: Arc<Mutex<f64>>,
     content_keys: ContentKeys,
+    virtual_epoch: Arc<AtomicU64>,
+    virtual_id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>,
     gpu_retired: Arc<AtomicBool>,
 }
 
@@ -1147,7 +1237,12 @@ impl Worker {
             job
         };
         let t0 = web_time::Instant::now();
-        let disk = job.src.disk.as_ref().map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts))));
+        let epoch = self.virtual_epoch.load(Ordering::Relaxed);
+        let disk = job
+            .src
+            .disk
+            .as_ref()
+            .map(|dc| (dc.clone(), frame_disk_key(content_keys, &job.src.project, &job.key, opts_hash(&job.opts), epoch, self.virtual_id.as_deref())));
         let from_disk = disk.as_ref().and_then(|(dc, k)| dc.get_frame(*k));
         let disk_hit = from_disk.is_some();
         let ci = match from_disk {
@@ -1375,6 +1470,54 @@ impl Queue {
 mod tests {
     use super::*;
 
+    struct ProbeDisk {
+        keys: Mutex<HashSet<u128>>,
+        probes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RemoteFrames for ProbeDisk {
+        fn slots(&self) -> usize {
+            0
+        }
+
+        fn disk(&self) -> bool {
+            true
+        }
+
+        fn disk_contains(&self, key: u128) -> bool {
+            self.probes.fetch_add(1, Ordering::Relaxed);
+            self.keys.lock().unwrap().contains(&key)
+        }
+
+        fn start(&self, _: RemoteJob, _: RemoteDone) {}
+    }
+
+    fn disk_fixture(stored_frames: &[i64]) -> (Frames, RenderSource, FrameKey, RenderOpts, Arc<ProbeDisk>, u128) {
+        let mut session = effectcraft_engine::Session::default();
+        session.execute("comp.new", serde_json::json!({"width": 32, "height": 18, "duration": 1})).unwrap();
+        let comp = session.active_comp_id().unwrap();
+        let opts = RenderOpts::default();
+        let content = 1234;
+        let mut base = key(1, 0, opts_hash(&opts));
+        base.revision = 7;
+        base.comp = comp.0;
+        let disk = Arc::new(ProbeDisk { keys: Mutex::new(HashSet::new()), probes: 0.into() });
+        disk.keys.lock().unwrap().extend(stored_frames.iter().map(|frame| disk_cache::frame_key(content, *frame, base.scale, base.view ^ opts_hash(&opts))));
+        let mut frames = Frames::default();
+        frames.set_remote(Some(disk.clone()));
+        frames.content_keys.lock().unwrap().insert((base.revision, base.comp, 0), content);
+        let source = RenderSource {
+            project: session.project.clone(),
+            footage: session.footage.clone(),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: None,
+            gpu_display: false,
+            disk: None,
+        };
+        (frames, source, base, opts, disk, content)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn disk_indicator_does_not_hash_on_ui_thread_and_coalesces_edits() {
@@ -1422,18 +1565,63 @@ mod tests {
         base.comp = cid.0;
         for revision in 1..50 {
             base.revision = revision;
-            assert!(frames.disk_frames(&src, &base, 30, &opts).is_empty());
+            assert!(frames.disk_frames(&src, &base, 0..30, &opts).is_empty());
         }
         assert!(frames.content_keys.lock().unwrap().is_empty(), "painting computed a content hash while the worker was blocked");
         assert_eq!(frames.content_key_jobs.lock().unwrap().pending.len(), 1);
         release.send(()).unwrap();
         let until = Instant::now() + Duration::from_secs(3);
-        while !frames.content_keys.lock().unwrap().contains_key(&(base.revision, base.comp)) {
+        while !frames.content_keys.lock().unwrap().contains_key(&(base.revision, base.comp, 0)) {
             assert!(Instant::now() < until);
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(frames.disk_frames(&src, &base, 30, &opts), vec![2], "the blue indicator must return once its key is ready");
+        assert_eq!(frames.disk_frames(&src, &base, 0..30, &opts), vec![2], "the blue indicator must return once its key is ready");
         assert_eq!(frames.content_keys.lock().unwrap().len(), 1, "superseded revisions were hashed");
+    }
+
+    #[test]
+    fn disk_indicator_range_tracks_live_membership() {
+        let (frames, src, base, opts, disk, _) = disk_fixture(&[10, 12]);
+        assert_eq!(frames.disk_frames(&src, &base, 10..13, &opts), vec![10, 12]);
+        assert_eq!(disk.probes.load(Ordering::Relaxed), 3);
+
+        disk.keys.lock().unwrap().insert(disk_cache::frame_key(1234, 11, base.scale, base.view ^ opts_hash(&opts)));
+        assert_eq!(frames.disk_frames(&src, &base, 10..13, &opts), vec![10, 11, 12]);
+
+        insert(&frames, FrameKey { frame: 11, ..base });
+        disk.probes.store(0, Ordering::Relaxed);
+        assert_eq!(frames.disk_frames(&src, &base, 10..13, &opts), vec![10, 12]);
+        assert_eq!(disk.probes.load(Ordering::Relaxed), 2);
+
+        disk.keys.lock().unwrap().remove(&disk_cache::frame_key(1234, 12, base.scale, base.view ^ opts_hash(&opts)));
+        assert_eq!(frames.disk_frames(&src, &base, 10..13, &opts), vec![10]);
+
+        let mut revised = base;
+        revised.revision += 1;
+        frames.content_keys.lock().unwrap().insert((revised.revision, revised.comp, 0), 5678);
+        assert!(frames.disk_frames(&src, &revised, 10..13, &opts).is_empty());
+
+        let changed = FrameKey { scale: base.scale + 1, ..base };
+        assert!(frames.disk_frames(&src, &changed, 10..13, &opts).is_empty());
+        let changed = FrameKey { view: base.view + 1, ..base };
+        assert!(frames.disk_frames(&src, &changed, 10..13, &opts).is_empty());
+        assert!(frames.disk_frames(&src, &base, 10..13, &RenderOpts { draft: true, ..opts }).is_empty());
+    }
+
+    #[test]
+    fn disk_indicator_range_is_bounded() {
+        let (frames, src, base, opts, disk, _) = disk_fixture(&[0, 1, 99_999]);
+        assert_eq!(frames.disk_frames(&src, &base, -5..2, &opts), vec![0, 1]);
+        assert_eq!(disk.probes.load(Ordering::Relaxed), 2);
+        disk.probes.store(0, Ordering::Relaxed);
+        assert_eq!(frames.disk_frames(&src, &base, 99_999..i64::MAX, &opts), vec![99_999]);
+        assert_eq!(disk.probes.load(Ordering::Relaxed), 1);
+        disk.probes.store(0, Ordering::Relaxed);
+        assert!(frames.disk_frames(&src, &base, 2..2, &opts).is_empty());
+        // Written as a struct literal: `3..2` trips clippy::reversed_empty_ranges.
+        let reversed = std::ops::Range { start: 3, end: 2 };
+        assert!(frames.disk_frames(&src, &base, reversed, &opts).is_empty());
+        assert_eq!(disk.probes.load(Ordering::Relaxed), 0);
     }
 
     /// Frames larger than the texture limit are averaged down by a whole factor (#201: an
@@ -1795,21 +1983,17 @@ mod tests {
         assert!(!f.is_cached(&key(1, 13, 0)) && f.is_cached(&key(1, 50, 0)));
     }
 
-    /// #595: prefetch renders the frames the preview reaches first, whatever order they were
-    /// asked for in (a frame evicted and asked for again waited behind every frame further
-    /// ahead); queued frames the preview no longer reaches are dropped and not left in flight.
-    #[test]
-    fn prefetch_renders_the_frames_the_playhead_reaches_first() {
-        struct Idle;
-        impl RemoteFrames for Idle {
-            fn slots(&self) -> usize {
-                0
-            }
-            fn start(&self, _: RemoteJob, _: RemoteDone) {}
+    /// A frame source that queues jobs and never renders them: the tests check the queue.
+    struct Idle;
+    impl RemoteFrames for Idle {
+        fn slots(&self) -> usize {
+            0
         }
-        let mut f = Frames::default();
-        f.set_remote(Some(Arc::new(Idle)));
-        let src = RenderSource {
+        fn start(&self, _: RemoteJob, _: RemoteDone) {}
+    }
+
+    fn idle_source() -> RenderSource {
+        RenderSource {
             project: Arc::default(),
             footage: Arc::new(effectcraft_engine::render::NoFootage),
             expr: None,
@@ -1817,7 +2001,17 @@ mod tests {
             gpu: None,
             gpu_display: false,
             disk: None,
-        };
+        }
+    }
+
+    /// #595: prefetch renders the frames the preview reaches first, whatever order they were
+    /// asked for in (a frame evicted and asked for again waited behind every frame further
+    /// ahead); queued frames the preview no longer reaches are dropped and not left in flight.
+    #[test]
+    fn prefetch_renders_the_frames_the_playhead_reaches_first() {
+        let mut f = Frames::default();
+        f.set_remote(Some(Arc::new(Idle)));
+        let src = idle_source();
         for frame in [40, 30, 20, 5, 12, 11] {
             f.request(&src, key(1, frame, 0), ItemId(1), Tick::ZERO, RenderOpts::default());
         }
@@ -1832,6 +2026,38 @@ mod tests {
         }
         assert_eq!(order, [(1, 11), (1, 12), (1, 20), (1, 30), (1, 40), (2, 1)]);
         assert_eq!(f.inflight(), 6, "frame 5, behind the playhead, is no longer in flight");
+    }
+
+    /// The cache is full. A zoom (or preview-resolution) change left the frames of the old
+    /// size to the plain least-recently-shown order, so the frames of the zoom the viewer is back
+    /// at went before the ones of the abandoned zoom. The other size's frames go first, then the
+    /// order is as before.
+    #[test]
+    fn a_size_change_evicts_frames_of_other_sizes_first() {
+        let mut f = Frames::default();
+        f.set_remote(Some(Arc::new(Idle)));
+        f.set_budget(4 * 16);
+        let at = |frame, scale| FrameKey { scale, ..key(1, frame, 0) };
+        // 100% (frames 0..=1) is cached, then 50% (2..=3): the 100% frames are the oldest.
+        for (frame, scale) in [(0, 1000), (1, 1000), (2, 500), (3, 500)] {
+            insert(&f, at(frame, scale));
+        }
+        // A passive viewer at 50% asks for a frame: that doesn't change which size is kept.
+        f.request(&idle_source(), at(9, 500), ItemId(1), Tick::ZERO, RenderOpts::default());
+        // Back at 100%: the viewer asks for frame 4.
+        f.request_urgent(&idle_source(), at(4, 1000), ItemId(1), Tick::ZERO, RenderOpts::default());
+        f.request(&idle_source(), at(10, 500), ItemId(1), Tick::ZERO, RenderOpts::default());
+        insert(&f, at(4, 1000));
+        assert!(
+            f.is_cached(&at(0, 1000)) && f.is_cached(&at(1, 1000)) && !f.is_cached(&at(2, 500)) && f.is_cached(&at(3, 500)),
+            "the first frame of the old size goes, not the cached ones of the current size"
+        );
+        insert(&f, at(5, 1000));
+        assert!(!f.is_cached(&at(3, 500)), "then the last frame of the old size");
+        assert_eq!(f.cached_frames(&at(0, 1000)), [0, 1, 4, 5]);
+        // No other size left: least recently shown first again.
+        insert(&f, at(6, 1000));
+        assert_eq!(f.cached_frames(&at(0, 1000)), [1, 4, 5, 6]);
     }
 
     #[test]
@@ -1988,6 +2214,156 @@ mod tests {
         assert_eq!(at(&s), o1, "a mute after a real edit keeps that edit's frames");
         switch(&mut s, inner, solid, "video", true);
         assert_ne!(at(&s), o1);
+    }
+
+    /// A cut or trim recaches only the frames of the layers it touched (#1641), and none are
+    /// kept when the change reaches other layers (here a child of the trimmed layer).
+    #[test]
+    fn an_edit_keeps_the_frames_outside_the_layers_it_changed() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+        let comp = ItemId(id(s.execute("comp.new", json!({"name": "Edit", "width": 8, "height": 8, "duration": 10})).unwrap(), "comp"));
+        let a = id(s.execute("layer.newSolid", json!({"comp": comp.0, "color": "#ff0000"})).unwrap(), "layer");
+        let b = id(s.execute("layer.newSolid", json!({"comp": comp.0, "color": "#00ff00"})).unwrap(), "layer");
+        s.execute("layer.timing", json!({"layers": [a], "in": 0, "out": 4})).unwrap();
+        s.execute("layer.timing", json!({"layers": [b], "in": 4, "out": 10})).unwrap();
+        let (fr, out) = s.project.comp(comp).map(|c| (c.frame_rate, c.layers.iter().find(|l| l.id.0 == a).unwrap().out_point)).unwrap();
+        let frames: Vec<i64> = (0..fr.frame_at(Tick::from_seconds_f64(10.0))).collect();
+        let f = Frames::default();
+        let cache_all = |s: &Session| {
+            let c = f.content_of(&s.project, s.revision, comp);
+            frames.iter().for_each(|&n| insert(&f, key(c, n, 0)));
+            c
+        };
+        let cached = |c: u64| frames.iter().filter(|&&n| f.is_cached(&key(c, n, 0))).copied().collect::<Vec<_>>();
+        let before = cache_all(&s);
+        s.execute("time.set", json!({"time": 2.0})).unwrap();
+        s.execute("edit.splitLayer", json!({"layers": [a]})).unwrap();
+        let after = f.content_of(&s.project, s.revision, comp);
+        assert_ne!(after, before);
+        let kept: Vec<i64> = (fr.frame_at(out) + 2..frames.len() as i64).collect();
+        assert_eq!(cached(after), kept, "the cut layer's frames (and one either side) render again; the rest stay");
+
+        s.execute("layer.setParent", json!({"layers": [b], "parent": a})).unwrap();
+        let parented = cache_all(&s);
+        s.execute("layer.timing", json!({"layers": [a], "out": 1})).unwrap();
+        assert_eq!(cached(f.content_of(&s.project, s.revision, comp)), Vec::<i64>::new(), "the trimmed layer's child moves everywhere");
+        assert_eq!(cached(parented).len(), frames.len(), "the earlier frames stay for undo");
+    }
+
+    /// Every frame an edit keeps renders as a fresh render of the edited project does: Solo
+    /// hides the other layers at every frame, and a camera reaches the frames whose shutter
+    /// samples it (#1641 review).
+    #[test]
+    fn the_frames_an_edit_keeps_match_a_fresh_render() {
+        use effectcraft_engine::Session;
+        use effectcraft_engine::render::NoFootage;
+        use serde_json::json;
+        // Cache every frame of `comp`, run `edit`, check the frames kept against fresh renders.
+        fn kept(s: &mut Session, comp: ItemId, edit: serde_json::Value) -> Vec<i64> {
+            let (fr, n) = s.project.comp(comp).map(|c| (c.frame_rate, c.frame_rate.frame_at(c.duration))).unwrap();
+            let f = Frames::default();
+            let before = f.content_of(&s.project, s.revision, comp);
+            (0..n).for_each(|i| insert(&f, key(before, i, 0)));
+            let old = s.project.clone();
+            s.execute(edit["cmd"].as_str().unwrap(), edit["params"].clone()).unwrap();
+            let after = f.content_of(&s.project, s.revision, comp);
+            let kept: Vec<i64> = (0..n).filter(|&i| f.is_cached(&key(after, i, 0))).collect();
+            let render = |p, i| Renderer::new(p, &NoFootage, RenderOpts::default()).comp_frame(comp, fr.tick_of(i));
+            for &i in &kept {
+                assert_eq!(render(&old, i), render(&s.project, i), "kept frame {i} draws other pixels now");
+            }
+            kept
+        }
+        let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+        let mut s = Session::default();
+
+        // Solo on a 2–3 s layer hides the 10 s underlay everywhere; turning it off shows it again.
+        let comp = ItemId(id(s.execute("comp.new", json!({"name": "Solo", "width": 8, "height": 8, "duration": 10})).unwrap(), "comp"));
+        s.execute("layer.newSolid", json!({"comp": comp.0, "color": "#ff0000"})).unwrap();
+        let short = id(s.execute("layer.newSolid", json!({"comp": comp.0, "color": "#00ff00"})).unwrap(), "layer");
+        s.execute("layer.timing", json!({"layers": [short], "in": 2, "out": 3})).unwrap();
+        let solo = |on: bool| json!({"cmd": "layer.setSwitch", "params": {"layers": [short], "switch": "solo", "value": on}});
+        assert_eq!(kept(&mut s, comp, solo(true)), Vec::<i64>::new());
+        assert_eq!(kept(&mut s, comp, solo(false)), Vec::<i64>::new());
+
+        // A 2–3 s camera over a 4 s motion-blurred 3D layer, shutter 720° at phase 360°: a frame
+        // samples 1 to 3 frames ahead, so moving the camera reaches the 3 frames before it.
+        let comp = ItemId(id(
+            s.execute("comp.new", json!({"name": "Cam", "width": 16, "height": 16, "duration": 4, "frameRate": 30, "shutterAngle": 720, "shutterPhase": 360}))
+                .unwrap(),
+            "comp",
+        ));
+        let plane = id(s.execute("layer.newSolid", json!({"comp": comp.0, "color": "#ff0000"})).unwrap(), "layer");
+        for sw in ["threeD", "motionBlur"] {
+            s.execute("layer.setSwitch", json!({"layers": [plane], "switch": sw, "value": true})).unwrap();
+        }
+        let cam = id(s.execute("layer.newCamera", json!({"comp": comp.0})).unwrap(), "layer");
+        s.execute("layer.timing", json!({"layers": [cam], "in": 2, "out": 3})).unwrap();
+        let moved =
+            kept(&mut s, comp, json!({"cmd": "prop.set", "params": {"comp": comp.0, "layer": cam, "path": "transform/position", "value": [40, 8, -30]}}));
+        assert!(moved.contains(&0) && moved.contains(&100), "frames far from the camera stay: {moved:?}");
+        assert!(!(56..=91).any(|f| moved.contains(&f)), "frames whose shutter samples the camera render again: {moved:?}");
+    }
+
+    #[test]
+    fn short_solid_additions_and_removals_keep_unaffected_frames() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let comp = ItemId(s.execute("comp.new", json!({"width": 8, "height": 8, "frameRate": 30, "duration": 20})).unwrap()["comp"].as_u64().unwrap());
+        s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+        let f = Frames::default();
+        let cache_all = |s: &Session| {
+            let content = f.content_of(&s.project, s.revision, comp);
+            (0..600).for_each(|n| insert(&f, key(content, n, 0)));
+        };
+        let cached = |s: &Session| f.cached_frames(&key(f.content_of(&s.project, s.revision, comp), 0, 0));
+        // 2–3 s, a quarter frame of the default shutter and a frame of rounding either side.
+        let kept: Vec<i64> = (0..=57).chain(92..600).collect();
+        cache_all(&s);
+        let solid = s.execute("layer.newSolid", json!({"color": "#00ff00"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.timing", json!({"layers": [solid], "in": 2, "out": 3})).unwrap();
+        assert_eq!(cached(&s), kept, "adding a source invalidates only frames 58..=91");
+        cache_all(&s);
+        s.execute("edit.undo", json!({})).unwrap();
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(cached(&s), (0..600).collect::<Vec<_>>(), "undoing the addition restores every frame");
+        s.execute("edit.redo", json!({})).unwrap();
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(cached(&s), (0..600).collect::<Vec<_>>(), "redoing the addition restores every frame");
+        s.execute("edit.clear", json!({"layers": [solid]})).unwrap();
+        assert_eq!(cached(&s), kept, "removing its layer invalidates the same span");
+    }
+
+    #[test]
+    fn adding_a_source_does_not_hide_changes_to_existing_dependencies() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        for (command, params) in [
+            ("layer.settings", json!({"comp": "Outer", "layer": "Underlay", "color": "#0000ff"})),
+            ("prop.set", json!({"comp": "Inner", "layer": "Inner solid", "path": "transform/opacity", "value": 40})),
+        ] {
+            let mut s = Session::default();
+            let comp = ItemId(
+                s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "frameRate": 30, "duration": 20})).unwrap()["comp"].as_u64().unwrap(),
+            );
+            s.execute("layer.newSolid", json!({"name": "Underlay", "color": "#ff0000"})).unwrap();
+            s.execute("comp.new", json!({"name": "Inner", "width": 8, "height": 8, "duration": 20})).unwrap();
+            s.execute("layer.newSolid", json!({"name": "Inner solid", "color": "#00ff00"})).unwrap();
+            s.execute("comp.open", json!({"comp": "Outer"})).unwrap();
+            s.execute("layer.addItem", json!({"item": "Inner"})).unwrap();
+            let f = Frames::default();
+            let before = f.content_of(&s.project, s.revision, comp);
+            (0..600).for_each(|n| insert(&f, key(before, n, 0)));
+            s.execute(command, params).unwrap();
+            let solid = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+            s.execute("layer.timing", json!({"layers": [solid], "in": 2, "out": 3})).unwrap();
+            let after = f.content_of(&s.project, s.revision, comp);
+            assert!(f.cached_frames(&key(after, 0, 0)).is_empty(), "{command} changes pixels outside the added layer");
+        }
     }
 
     #[test]
