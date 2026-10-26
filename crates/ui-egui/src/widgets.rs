@@ -709,7 +709,6 @@ pub fn menu_scroll<R>(ui: &mut Ui, browsing: bool, add: impl FnOnce(&mut Ui) -> 
     let max_h = ui.ctx().content_rect().height() - 40.0;
     let pending = ui.scope_id().with("menu-edge-scroll-offset");
     let target = ui.ctx().data_mut(|d| d.remove_temp::<f32>(pending));
-    let mut area = menu_scroll_area(max_h);
     if let Some(target) = target {
         area = area.vertical_scroll_offset(target);
     }
@@ -790,15 +789,6 @@ fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput
     Some(new)
 }
 
-/// The scroll area every menu body runs in: `max_h` points tall, and draggable to scroll with any
-/// pointer. See [`menu_drag`] for why the drag is forced on.
-fn menu_scroll_area(max_h: f32) -> egui::ScrollArea {
-    egui::ScrollArea::vertical()
-        .scroll_source(egui::containers::scroll_area::ScrollSource { drag: menu_drag(), ..egui::containers::scroll_area::ScrollSource::ALL })
-        .max_height(max_h)
-        .min_scrolled_height(max_h)
-}
-
 /// How a menu's contents respond to a drag: always, with the scroll bar and the wheel too.
 ///
 /// egui's own default (`DragScroll::OnTouch`) gates drag-to-scroll behind
@@ -823,7 +813,6 @@ fn menu_drag() -> egui::containers::scroll_area::DragScroll {
 /// [`TOUCH_BAR_TARGET`] points.
 ///
 /// The themes build `ScrollStyle::solid` with a 6-point `bar_width`; the app's own
-/// [`scroll_bar`] widens only its drawn hit. Every panel that lays out its own rows draws that
 /// one, but every `ScrollArea` (menus, the file browser, Settings' page list) hit-tests through
 /// this style value, and a finger misses the 6-point band — so on a touch screen it is widened.
 /// Because the styles are replaced outright whenever a theme is applied (`theme::apply_visuals`),
@@ -843,13 +832,12 @@ pub fn touch_scroll_target(ctx: &egui::Context) {
     if !narrow {
         return;
     }
-    ctx.all_styles_mut(|s| {
-        let sc = &mut s.spacing.scroll;
+    let widen = |sc: &mut egui::style::ScrollStyle| {
         let resting = sc.bar_width;
         sc.bar_width = sc.bar_width.max(TOUCH_BAR_TARGET);
         sc.floating = true;
         sc.floating_width = sc.floating_width.max(resting);
-        sc.floating_allocated_width = sc.floating_allocated_width.max(sc.bar_inner_margin + resting + sc.bar_outer_margin);
+        sc.floating_allocated_width = sc.floating_width.max(sc.bar_inner_margin + resting + sc.bar_outer_margin);
         // Thin like the solid bar was while the finger is elsewhere:
         sc.dormant_background_opacity = 1.0;
         sc.dormant_handle_opacity = 1.0;
@@ -858,7 +846,15 @@ pub fn touch_scroll_target(ctx: &egui::Context) {
         // Translucent when the finger expands it over the content it scrolls.
         sc.interact_background_opacity = 0.6;
         sc.interact_handle_opacity = 0.6;
-    });
+    };
+    ctx.all_styles_mut(|s| widen(&mut s.spacing.scroll));
+    // egui 0.37's `all_styles_mut` covers only the light and dark theme styles, not the global
+    // one popups use. Leaving it thin made `narrow` true every frame, so every frame widened the
+    // theme styles again and the app spun without ever completing a pass (input went dead on the
+    // tablet). Widen it too, so the early return above takes effect on the next frame.
+    if narrower(&ctx.global_style()) {
+        ctx.global_style_mut(|s| widen(&mut s.spacing.scroll));
+    }
 }
 
 /// The scroll bar's interaction target on a touch screen, in points.
@@ -966,6 +962,187 @@ mod tests {
         frame(&ctx, &mut text, &mut id);
         let r = range(&ctx, id).unwrap();
         assert_eq!((r.primary.index.min(r.secondary.index), r.primary.index.max(r.secondary.index)), (ix(0), ix(6)));
+    }
+
+    /// #1: the panels have neither a wheel nor a trackpad, so a drag over a panel's own empty
+    /// space has to move it. With only `smooth_scroll_delta` the offset ignored a finger
+    /// completely — the right sidebar and every `PanelScroll` panel was frozen past the fold.
+    #[test]
+    fn a_panel_scrolls_when_a_pointer_drags_its_empty_space() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 400.0));
+        let area = screen;
+        let id = egui::Id::unique("drag-scroll-test");
+        let offset = std::cell::Cell::new(f32::NAN);
+        let run = |events: Vec<egui::Event>| {
+            // 500 points of rows in a 400 pt panel: 100 points of scroll.
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                let scroll = PanelScroll::begin(ui, id, area);
+                offset.set(scroll.offset);
+                scroll.end(ui, &mut Registry::default(), "drag-scroll-test", 500.0, &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark));
+            });
+            out.textures_delta.clear();
+        };
+        let p = |y: f32| egui::Event::PointerMoved(pos2(150.0, y));
+        let press = |y: f32, down: bool| egui::Event::PointerButton {
+            pos: pos2(150.0, y),
+            button: egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let at = |want: f32, what: &str| {
+            let got = offset.get();
+            assert!((got - want).abs() < 0.5, "{what}: offset {got}, wanted {want}");
+        };
+        run(vec![p(300.0)]);
+        run(vec![press(300.0, true)]);
+        // The content follows the finger: up goes to later rows, down back towards the first.
+        run(vec![p(260.0)]);
+        at(40.0, "the drag moved the offset with the finger");
+        run(vec![p(220.0)]);
+        at(80.0, "and keeps following it");
+        run(vec![p(240.0)]);
+        at(60.0, "down too");
+        // Clamped at both ends, never past the rows.
+        run(vec![p(40.0)]);
+        at(100.0, "clamped at the end of the rows");
+        run(vec![press(40.0, false)]);
+        run(vec![p(250.0)]);
+        run(vec![press(250.0, true)]);
+        run(vec![p(390.0)]);
+        at(0.0, "and clamped back at the first row");
+        run(vec![press(390.0, false)]);
+    }
+
+    /// #1: the scroll bar's track is 4 points wide — a mouse always landed on its 10-point hit, a
+    /// finger could not. The drag it registers reaches 8 points past each side, so a press well
+    /// beside the track scrolls the content (it landed on the panel underneath before).
+    #[test]
+    fn the_scroll_bar_reaches_past_its_track_for_a_finger() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 400.0));
+        // A horizontal bar: the widened hit runs past the track's top and bottom edges, which is
+        // where a press beside a vertical bar's track lands too (the same expansion, other axis).
+        let track = Rect::from_min_max(pos2(10.0, 300.0), pos2(190.0, 304.0));
+        // ~12 points past the track and past the thumb, so the press is a track press that
+        // centres the thumb there. The old 3-point expansion (with egui's own hit slop) reached
+        // only about 315, so before the widening this press landed on the panel and did nothing.
+        let at = pos2(170.0, 316.0);
+        let scrolled = std::cell::Cell::new(f32::NAN);
+        let run = |events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                scrolled.set(scroll_bar(
+                    ui,
+                    &mut Registry::default(),
+                    "bar-reach-test",
+                    track,
+                    0.0,
+                    100.0,
+                    &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark),
+                ));
+            });
+            out.textures_delta.clear();
+        };
+        run(vec![egui::Event::PointerMoved(at)]);
+        run(vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]);
+        assert!(scrolled.get() > 0.0, "a press 12 points past the track centres the thumb there: {}", scrolled.get());
+    }
+
+    /// #269: a menu taller than its window has to be scrollable, and the Edit menu on a phone in
+    /// landscape is exactly that. egui's `DragScroll::OnTouch` gate is closed on Android (winit
+    /// reports no touch device), so a finger drag left the menu byte-for-byte unchanged; the
+    /// menu's scroll area forces the drag on.
+    #[test]
+    fn a_menu_taller_than_the_window_scrolls_by_drag() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let last_y = std::cell::Cell::new(f32::NAN);
+        let run = |events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                menu_scroll(ui, false, |ui| {
+                    for i in 0..42 {
+                        let r = ui.label(format!("row {i}"));
+                        if i == 41 {
+                            last_y.set(r.rect.min.y);
+                        }
+                    }
+                });
+            });
+            out.textures_delta.clear();
+        };
+        run(Vec::new());
+        let before = last_y.get();
+        assert!(before > screen.height(), "the test menu must overflow its window: last row at {before} pt of {}", screen.height());
+        let p = |y: f32| egui::Event::PointerMoved(pos2(30.0, y));
+        run(vec![p(250.0)]);
+        run(vec![egui::Event::PointerButton { pos: pos2(30.0, 250.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]);
+        let mut last = before;
+        // Several steps: a drag has to move the menu by a real part of the overflow.
+        for y in [200.0, 150.0, 100.0, 50.0] {
+            run(vec![p(y)]);
+            last = last_y.get();
+        }
+        run(vec![egui::Event::PointerButton { pos: pos2(30.0, 50.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]);
+        assert!(last < before - 50.0, "the drag moved the menu's rows up: {before} -> {last}");
+    }
+
+    /// The widening runs on every frame (a theme switch can replace the styles), so once it has
+    /// widened them it must leave them alone: mutating them again every frame kept the app from
+    /// completing a pass on the tablet (egui 0.37's `all_styles_mut` does not cover the global
+    /// style, so the check stayed true forever and every frame rewrote the theme styles).
+    #[test]
+    fn the_touch_scroll_bar_target_settles_after_one_frame() {
+        let ctx = egui::Context::default();
+        let touch = egui::Event::Touch {
+            device_id: egui::TouchDeviceId(3),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::Start,
+            pos: egui::pos2(10.0, 10.0),
+            force: None,
+        };
+        ctx.begin_pass(egui::RawInput { events: vec![touch], ..Default::default() });
+        crate::theme::apply_visuals(&ctx, &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark));
+        super::touch_scroll_target(&ctx);
+        let dark = ctx.style_of(egui::Theme::Dark);
+        let light = ctx.style_of(egui::Theme::Light);
+        let global = ctx.global_style();
+        assert!(dark.spacing.scroll.bar_width >= super::TOUCH_BAR_TARGET);
+        super::touch_scroll_target(&ctx);
+        assert!(std::sync::Arc::ptr_eq(&dark, &ctx.style_of(egui::Theme::Dark)), "the dark style is not rewritten again");
+        assert!(std::sync::Arc::ptr_eq(&light, &ctx.style_of(egui::Theme::Light)), "the light style is not rewritten again");
+        assert!(std::sync::Arc::ptr_eq(&global, &ctx.global_style()), "the global style is not rewritten again");
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    /// A theme switch replaces each style outright, so [`touch_scroll_target`] has to widen the
+    /// bar again on the next frame; a window with no touch screen keeps the theme's thin bar.
+    #[test]
+    fn a_theme_switch_keeps_the_touch_scroll_bar_target() {
+        let touch = egui::Event::Touch {
+            device_id: egui::TouchDeviceId(3),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::Start,
+            pos: egui::pos2(10.0, 10.0),
+            force: None,
+        };
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        super::touch_scroll_target(&ctx);
+        let idle = ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width;
+        ctx.end_pass().drop_without_applying_deltas();
+        assert!(idle < super::TOUCH_BAR_TARGET, "no touch screen: the theme's thin bar stays ({idle})");
+
+        ctx.begin_pass(egui::RawInput { events: vec![touch.clone()], ..Default::default() });
+        super::touch_scroll_target(&ctx);
+        assert!(ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width >= super::TOUCH_BAR_TARGET);
+        ctx.end_pass().drop_without_applying_deltas();
+        crate::theme::apply_visuals(&ctx, &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark));
+        assert!(ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width < super::TOUCH_BAR_TARGET, "the theme rebuild starts from the thin bar again");
+        ctx.begin_pass(egui::RawInput { events: vec![touch], ..Default::default() });
+        super::touch_scroll_target(&ctx);
+        let after_theme = ctx.style_of(egui::Theme::Dark).spacing.scroll.bar_width;
+        ctx.end_pass().drop_without_applying_deltas();
+        assert!(after_theme >= super::TOUCH_BAR_TARGET, "a theme switch must not take the touch target away: {after_theme}");
     }
 
     /// #581: a field's text edit fills it, so its text and hint sit on the field's middle line

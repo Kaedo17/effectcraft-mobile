@@ -267,6 +267,33 @@ fn menu_edge_crawl_is_bounded_stops_and_keeps_wheel_and_menu_state_independent()
     assert_eq!(h.query_by_label_contains("Open Project").unwrap().rect(), released, "without the hold, the edge does not restart a crawl");
 }
 
+/// A fingertip cannot aim at the theme's 6-point scroll bar. A window that reports touch has to
+/// widen the `ScrollArea` target (menus, the file browser, Settings' page list) to a finger's
+/// size while keeping the drawing thin — otherwise those lists only scroll by wheel on a tablet.
+#[test]
+fn a_touch_screen_widens_the_scroll_bar_target() {
+    let mut h = harness(1200.0, 800.0);
+    let idle = h.ctx.style_of(egui::Theme::Dark).spacing.scroll;
+    let touch = Event::Touch { device_id: egui::TouchDeviceId(3), id: egui::TouchId(1), phase: egui::TouchPhase::Start, pos: pos2(100.0, 100.0), force: None };
+    h.input_mut().events.push(touch);
+    h.run_steps(3);
+    let wide = h.ctx.style_of(egui::Theme::Dark).spacing.scroll;
+    assert!(wide.bar_width >= 24.0, "a finger has to be able to land on the bar: {}", wide.bar_width);
+    assert!(wide.bar_width > idle.bar_width, "the target only widens: {} -> {}", idle.bar_width, wide.bar_width);
+    // Popups and menus read the global style, which egui 0.37 keeps apart from the theme styles:
+    // leaving it thin made the widening repeat every frame and the app never completed a pass.
+    let global = h.ctx.global_style().spacing.scroll;
+    assert!(global.bar_width >= 24.0, "the global style is widened too: {}", global.bar_width);
+    assert!(global.floating, "the global bar rests thin as well");
+    assert!(wide.floating, "the bar rests thin and only its target widens");
+    assert_eq!(wide.floating_width, idle.bar_width, "the resting bar draws as thick as the theme drew it: {}", idle.bar_width);
+    assert_eq!(
+        wide.floating_allocated_width,
+        idle.bar_inner_margin + idle.bar_width + idle.bar_outer_margin,
+        "the layout keeps the sliver the solid bar reserved, so content does not reflow"
+    );
+}
+
 /// A scroll bar's "scroll/max" automation label.
 fn scrolled(h: &Harness<'_, EffectcraftApp>, id: &str) -> (f32, f32) {
     let label = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}")).label.clone();
