@@ -270,6 +270,10 @@ pub(crate) fn above_footer(ui: &mut egui::Ui, height: f32, footer: impl FnOnce(&
 }
 
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    // Android's launch-time "All files access" prompt: offered once, after the first frames,
+    // when the host can both check and ask for the grant. Inert on every other host.
+    super::android_access::launch_tick(app, ctx);
+    super::android_access::show(app, ctx);
     let Some(d) = app.dialog else { return };
     let t = app.tokens;
     match d {

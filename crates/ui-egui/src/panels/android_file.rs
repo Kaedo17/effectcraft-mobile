@@ -290,7 +290,7 @@ fn icon_grid(
     let cols = grid_cols(rect.width(), tw);
     let rows = items.len().div_ceil(cols);
     let mut budget = 2u32;
-    let scroll = crate::widgets::PanelScroll::begin(ui, egui::Id::new(("filePicker.grid", scroll_key)), rect);
+    let scroll = crate::widgets::PanelScroll::begin(ui, egui::Id::unique(("filePicker.grid", scroll_key)), rect);
     let lp = ui.painter().with_clip_rect(rect);
     let mut clicked = None;
     for (i, item) in items.iter().enumerate() {
@@ -301,7 +301,7 @@ fn icon_grid(
         if !r.intersects(rect) {
             continue;
         }
-        let resp = ui.interact(r.intersect(rect), egui::Id::new(("filePicker.entry", i, item.label.as_str())), egui::Sense::click());
+        let resp = ui.interact(r.intersect(rect), egui::Id::unique(("filePicker.entry", i, item.label.as_str())), egui::Sense::click());
         app.auto.add(&format!("filePicker.entry.{}", item.label), r, &item.label);
         lp.rect_filled(
             r,

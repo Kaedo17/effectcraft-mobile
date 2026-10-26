@@ -125,6 +125,10 @@ page!(General {
     /// The in-app file picker's view: one of `PICKER_VIEWS` (`list`, `small`, `medium`,
     /// `large` icons), changed with the picker's own view buttons and remembered.
     picker_view: String = "large".into(),
+    /// Remembered "Not Now" from the launch-time "All files access" ask (`panels::android_access`
+    /// on Android): the shared-storage grant is asked once at launch unless the user chose to
+    /// skip it; the picker's own Grant access button still asks on demand.
+    android_skip_all_files_access_prompt: bool = false,
 });
 
 page!(Startup {

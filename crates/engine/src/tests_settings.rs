@@ -178,6 +178,20 @@ fn picker_view_validates_and_repairs() {
     assert_eq!(p3.general.picker_view, "large");
 }
 
+/// The launch prompt's remembered "Not Now" sets, reads and round-trips as the settings-file key
+/// the entry crate and the control channel see it by.
+#[test]
+fn android_skip_all_files_access_prompt_round_trips() {
+    let mut p = Prefs::default();
+    assert!(!p.general.android_skip_all_files_access_prompt);
+    p.set("general.androidSkipAllFilesAccessPrompt", json!(true)).unwrap();
+    assert!(p.general.android_skip_all_files_access_prompt);
+    assert_eq!(p.get("general.androidSkipAllFilesAccessPrompt"), Some(json!(true)));
+    let p2 = Prefs::from_json(&p.to_json());
+    assert!(p2.general.android_skip_all_files_access_prompt);
+    assert_eq!(p2.get("general.androidSkipAllFilesAccessPrompt"), Some(json!(true)));
+}
+
 #[test]
 fn every_schema_key_exists_and_docs_list_the_todo_settings() {
     let p = Prefs::default();

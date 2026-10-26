@@ -2,6 +2,7 @@
 
 /// Android's in-app file browser: Save / Open Project / exports / folder picks and media
 /// import over app-private storage and (once granted) shared storage; no system picker.
+pub mod android_access;
 pub mod android_file;
 pub mod anim_tools;
 pub mod camera_tracker_ui;

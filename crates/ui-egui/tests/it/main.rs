@@ -4,6 +4,7 @@ mod render_queue_snapshot;
 mod shared_docking_ui;
 mod ui_3d;
 mod ui_agent_audit;
+mod ui_android_access;
 mod ui_angles;
 mod ui_audio_scrub;
 mod ui_azerty_shortcuts;
