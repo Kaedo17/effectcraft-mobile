@@ -2461,6 +2461,11 @@ impl EffectcraftApp {
         // screen or another comp must stop idle prefetch at a stale scale.
         self.last_viewer_scale = None;
         self.apply_prefs(&ctx);
+        // A touch screen's bars: a fingertip has to land on a scroll bar (widgets.rs), and a
+        // theme change rebuilds the styles, so the widening is re-checked every frame. This is
+        // a drawing frame, after `apply_prefs` installed the styles (unlike `tick`, which must
+        // not touch layout or input).
+        widgets::touch_scroll_target(&ctx);
         // Video Preview is a second viewport: only a real pass can update it.
         prefs_live::frame(self, &ctx);
         self.auto.begin_frame();
