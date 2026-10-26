@@ -12,6 +12,7 @@
 
 use crate::i18n::tr;
 use effectcraft_engine::media_browser as mb;
+use effectcraft_engine::project::ItemId;
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -23,8 +24,44 @@ use crate::{EffectcraftApp, widgets};
 
 // ---------------------------------------------------------------- Media Browser
 
-/// The Media Browser's folder listing, shared per frame (the listing is minuted in a temp).
+type Thumb = Option<(egui::TextureHandle, [u32; 2])>;
 type Listing = (f64, Arc<Result<Vec<mb::Entry>, String>>);
+
+/// Thumbnail of a file (cached per path; `None` while not decoded or not decodable).
+fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
+    let id = egui::Id::unique(("mb-thumb", path));
+    if let Some(t) = ctx.data(|d| d.get_temp::<Thumb>(id)) {
+        return t;
+    }
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    let thumb = (|| {
+        let imp = app.session.importer.clone()?;
+        let f = imp.probe(path).ok()?;
+        if !f.has_video {
+            return None;
+        }
+        // A synthetic item id keyed by the path (the frame cache keys on the path).
+        let hid = path.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3)) | (1 << 62);
+        let img = app.session.footage.frame(ItemId(hid), &f, effectcraft_engine::time::Tick::ZERO)?;
+        let step = (img.width.max(img.height) as f32 / 128.0).ceil().max(1.0) as u32;
+        let (w, h) = (img.width.div_ceil(step), img.height.div_ceil(step));
+        let full = img.to_rgba8();
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let i = (((y * step) * img.width + x * step) * 4) as usize;
+                px.extend_from_slice(&full[i..i + 4]);
+            }
+        }
+        let tex = ctx.load_texture(format!("mb-{path}"), egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px), egui::TextureOptions::LINEAR);
+        Some((tex, [w, h]))
+    })();
+    ctx.data_mut(|d| d.insert_temp(id, thumb.clone()));
+    thumb
+}
 
 pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
@@ -39,7 +76,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let st = app.session.state.media_browser.clone();
     let dir = st.folder.clone().unwrap_or_else(|| b.home());
     // Listing cached per folder for a second.
-    let lid = egui::Id::new(("mb-list", dir.clone(), st.importable_only));
+    let lid = egui::Id::unique(("mb-list", dir.clone(), st.importable_only));
     let now = ctx.input(|i| i.time);
     let listing: Option<Listing> = ctx.data(|d| d.get_temp(lid));
     let entries = match listing {
@@ -100,7 +137,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     );
     for (i, (name, path)) in places.iter().enumerate() {
         let r = Rect::from_min_size(pos2(side.min.x, fy), vec2(side.width(), 20.0));
-        let resp = ui.interact(r, egui::Id::new(("mb-fav", i)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("mb-fav", i)), Sense::click());
         if *path == dir {
             p.rect_filled(r, 0.0, t.row_selected);
         } else if resp.hovered() {
@@ -125,7 +162,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let tile = vec2(140.0, 112.0);
     let cols = ((list.width() - 8.0) / tile.x).floor().max(1.0) as usize;
     let mut budget = 2u32;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("mb-scroll"), list);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("mb-scroll"), list);
     let lp = p.with_clip_rect(list);
     let mut actions: Vec<(&str, Value)> = vec![];
     for (i, e) in entries.iter().enumerate() {
@@ -136,14 +173,14 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if !r.intersects(list) {
             continue;
         }
-        let resp = ui.interact(r.intersect(list), egui::Id::new(("mb-entry", &e.path)), Sense::click_and_drag());
+        let resp = ui.interact(r.intersect(list), egui::Id::unique(("mb-entry", &e.path)), Sense::click_and_drag());
         app.auto.add(&format!("mediaBrowser.entry.{}", e.name), r, &e.name);
         lp.rect_filled(r, 4.0, if resp.hovered() { t.hover } else { t.row });
         let thumb = Rect::from_min_max(r.min + vec2(6.0, 6.0), pos2(r.max.x - 6.0, r.max.y - 26.0));
         lp.rect_filled(thumb, 3.0, Color32::from_rgb(0x18, 0x18, 0x18));
         let kind = if e.is_dir { "Folder" } else { e.kind.unwrap_or("File") };
         match (e.is_dir, e.kind) {
-            (false, Some("image" | "video")) => match super::thumbs::media(app, &ctx, &e.path, &mut budget) {
+            (false, Some("image" | "video")) => match thumbnail(app, &ctx, &e.path, &mut budget) {
                 Some((tex, [w, h])) => {
                     let s = (thumb.width() / w as f32).min(thumb.height() / h as f32);
                     lp.image(
@@ -227,7 +264,7 @@ fn rows_of(v: &Value) -> Vec<(String, String)> {
 
 /// An editable comment field; returns the edited text when it changes.
 fn comment_field(ui: &mut egui::Ui, r: Rect, id: &str, text: &str) -> Option<String> {
-    let key = egui::Id::new(("meta-comment", id));
+    let key = egui::Id::unique(("meta-comment", id));
     let mut buf: String = ui.data(|d| d.get_temp(key)).unwrap_or_else(|| text.to_string());
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
     let resp = child.add(egui::TextEdit::multiline(&mut buf).desired_width(r.width()).desired_rows(2).hint_text(tr("Add a comment")));
@@ -401,8 +438,8 @@ mod tests {
                 kind: Some("video"),
             })
             .collect();
-        let old_id = egui::Id::new("old-list");
-        let new_id = egui::Id::new("new-list");
+        let old_id = egui::Id::unique("old-list");
+        let new_id = egui::Id::unique("new-list");
         ctx.data_mut(|d| {
             d.insert_temp(old_id, (0.0, Ok::<_, String>(entries.clone())));
             d.insert_temp(new_id, (0.0, Arc::new(Ok::<_, String>(entries))));
