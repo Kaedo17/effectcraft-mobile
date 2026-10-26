@@ -62,6 +62,10 @@ pub fn capture(app: &android_activity::AndroidApp) -> Option<AndroidAccess> {
     // version; the browser keeps its app-private root (which everything else continues to use).
     let access = AndroidAccess { vm, activity, sdk_level: None };
     let access = AndroidAccess { sdk_level: access.sdk(), ..access };
+    if access.sdk_level.is_none() {
+        log::warn!("android access: SDK query failed; the browser keeps its app-private root");
+        return None;
+    }
     if access.sdk_level == Some(29) {
         log::info!(
             "android access: Android 10 enforces scoped storage for this app and the legacy opt-out is not in the manifest; the browser keeps its app-private root"
