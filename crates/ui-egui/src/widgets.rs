@@ -1026,7 +1026,7 @@ mod tests {
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 400.0));
         let area = screen;
-        let id = egui::Id::new("drag-scroll-test");
+        let id = egui::Id::unique("drag-scroll-test");
         let offset = std::cell::Cell::new(f32::NAN);
         let run = |events: Vec<egui::Event>| {
             // 500 points of rows in a 400 pt panel: 100 points of scroll.

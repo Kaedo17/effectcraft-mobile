@@ -99,10 +99,10 @@ impl Prefs {
         }
         let g = &mut self.general;
         if !is_choice(LANGUAGES, &g.language) {
+            g.language = General::default().language;
+        }
         if !is_choice(PICKER_VIEWS, &g.picker_view) {
             g.picker_view = General::default().picker_view;
-        }
-            g.language = General::default().language;
         }
         g.undo_levels = g.undo_levels.clamp(1, 99);
         g.path_point_size = g.path_point_size.clamp(3, 20);

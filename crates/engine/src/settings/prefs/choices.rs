@@ -40,6 +40,7 @@ pub const THEMES: &[(&str, &str)] = &[("Dark", "dark"), ("Darker", "darker"), ("
 pub(super) fn choices(key: &str) -> Option<&'static [(&'static str, &'static str)]> {
     match key {
         "general.language" => Some(LANGUAGES),
+        "general.pickerView" => Some(PICKER_VIEWS),
         "startup.windowGraphics" => Some(WINDOW_GRAPHICS),
         "appearance.appearanceMode" => Some(APPEARANCE_MODES),
         "appearance.darkTheme" => Some(DARK_THEMES),
