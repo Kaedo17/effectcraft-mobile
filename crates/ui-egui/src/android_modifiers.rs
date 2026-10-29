@@ -21,7 +21,7 @@
 /// Ported from FilmCraft's Android input fix (`47f202cb` + `ecea29d6` in
 /// `Kaedo17/filmcraft-mobile`), where it was validated on hardware first.
 #[cfg(any(target_os = "android", test))]
-fn stamp_android_modifiers(events: &mut Vec<egui::Event>, held: &mut egui::Modifiers) {
+pub(crate) fn stamp_android_modifiers(events: &mut Vec<egui::Event>, held: &mut egui::Modifiers) {
     for event in events.iter_mut() {
         match event {
             // A lost focus clears the tracked state, so a modifier held while the app is
