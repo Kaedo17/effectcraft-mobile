@@ -296,6 +296,7 @@ fn run_inner(
         "EffectCraft",
         options,
         Box::new(move |cc| {
+            EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
             match &cc.wgpu_render_state {
                 Some(rs) => log::info!("graphics: {:?}", rs.adapter.get_info()),
                 None => log::info!("graphics: no wgpu device"),
@@ -375,6 +376,7 @@ fn run_inner(
             // reported in a toast and forgotten).
             let _ = session.execute("window.restoreScriptPanels", json!({}));
             let mut app = EffectcraftApp::new(session);
+            app.set_startup_update_check(true);
             app.set_gpu_failure_bridge(gpu_failures);
             app.ui.start_screen = show_home;
             if let Some(n) = notice {
@@ -585,14 +587,18 @@ struct Desktop {
 }
 
 impl eframe::App for Desktop {
+    /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick, close the IME pass, show the
+    /// file dialogs asked for and, last, hand a close to the platform quit.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.menu.update(&mut self.app, ctx);
-        self.app.logic(ctx, frame);
+        self.app.tick(ctx, frame);
+        self.app.finish_ime_logic(ctx);
         #[cfg(not(target_os = "android"))]
         if let Some(asked) = &self.file_dialogs {
             sheet_dialogs::show_asked(asked, frame, ctx);
         }
+        effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
