@@ -340,9 +340,14 @@ fn run_inner(
             #[cfg(target_os = "android")]
             if let Some(l) = &android_layout {
                 if let Err(e) = android_storage::ensure(l) {
+                    // The contract: the affected feature stays off rather than crashing. Leaving
+                    // the config unset keeps settings absent (DirConfig reads would fail anyway)
+                    // instead of pointing them at a directory that could not be created, where
+                    // every write would then fail while creating its parent.
                     log::warn!("android storage: {e}");
+                } else {
+                    session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(l.config.clone())));
                 }
-                session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(l.config.clone())));
             }
             session.load_settings();
             // Fit the window to its monitor, or put it back where it was (still hidden).
