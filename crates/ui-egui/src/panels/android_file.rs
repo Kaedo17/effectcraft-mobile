@@ -270,6 +270,13 @@ fn paint_picture(lp: &egui::Painter, area: egui::Rect, id: egui::TextureId, size
     lp.image(id, Rect::from_center_size(area.center(), size * s), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
 }
 
+/// What the icon grid draws: the view's tile size, the entries and the scroll identity.
+struct Grid<'a> {
+    view: PickView,
+    items: &'a [TileItem],
+    scroll_key: &'a str,
+}
+
 /// Draws the icon grid over `rect` (tiles laid out like the Media Browser's, scrolled with a
 /// finger through [`crate::widgets::PanelScroll`]) and returns the index of the entry tapped
 /// this frame. Thumbnails decode at most twice per frame, the rest arrive on later repaints.
@@ -279,10 +286,9 @@ fn icon_grid(
     ctx: &egui::Context,
     t: &crate::theme::Tokens,
     rect: egui::Rect,
-    view: PickView,
-    items: &[TileItem],
-    scroll_key: &str,
+    grid: Grid<'_>,
 ) -> Option<usize> {
+    let Grid { view, items, scroll_key } = grid;
     use crate::theme::Tokens;
     use egui::{Align2, Rect, pos2, vec2};
 
@@ -290,7 +296,7 @@ fn icon_grid(
     let cols = grid_cols(rect.width(), tw);
     let rows = items.len().div_ceil(cols);
     let mut budget = 2u32;
-    let scroll = crate::widgets::PanelScroll::begin(ui, egui::Id::new(("filePicker.grid", scroll_key)), rect);
+    let scroll = crate::widgets::PanelScroll::begin(ui, egui::Id::unique(("filePicker.grid", scroll_key)), rect);
     let lp = ui.painter().with_clip_rect(rect);
     let mut clicked = None;
     for (i, item) in items.iter().enumerate() {
@@ -301,7 +307,7 @@ fn icon_grid(
         if !r.intersects(rect) {
             continue;
         }
-        let resp = ui.interact(r.intersect(rect), egui::Id::new(("filePicker.entry", i, item.label.as_str())), egui::Sense::click());
+        let resp = ui.interact(r.intersect(rect), egui::Id::unique(("filePicker.entry", i, item.label.as_str())), egui::Sense::click());
         app.auto.add(&format!("filePicker.entry.{}", item.label), r, &item.label);
         lp.rect_filled(
             r,
@@ -611,7 +617,7 @@ pub fn show(app: &mut crate::EffectcraftApp, ctx: &egui::Context, t: &crate::the
                         })
                         .collect();
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 300.0), egui::Sense::hover());
-                    if let Some(i) = icon_grid(app, ui, ctx, t, rect, view, &items, "openProject")
+                    if let Some(i) = icon_grid(app, ui, ctx, t, rect, Grid { view, items: &items, scroll_key: "openProject" })
                         && let Some(p) = projects.get(i)
                     {
                         open = Some(p.to_string_lossy().to_string());
@@ -790,7 +796,7 @@ fn browser(app: &mut crate::EffectcraftApp, ctx: &egui::Context, t: &crate::them
                 TileItem { label: f.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string(), tile, selected: is_file && selected.contains(f) }
             }));
             let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 300.0), egui::Sense::hover());
-            if let Some(i) = icon_grid(app, ui, ctx, t, rect, view, &items, "browser") {
+            if let Some(i) = icon_grid(app, ui, ctx, t, rect, Grid { view, items: &items, scroll_key: "browser" }) {
                 if let Some(sub) = dirs.get(i) {
                     enter = Some(sub.clone());
                 } else if let Some(file_i) = i.checked_sub(dirs.len()) {

@@ -26,43 +26,6 @@ use crate::{EffectcraftApp, widgets};
 /// The Media Browser's folder listing, shared per frame (the listing is minuted in a temp).
 type Listing = (f64, Arc<Result<Vec<mb::Entry>, String>>);
 
-<<<<<<< HEAD
-/// Thumbnail of a file (cached per path; `None` while not decoded or not decodable).
-fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
-    let id = egui::Id::unique(("mb-thumb", path));
-    if let Some(t) = ctx.data(|d| d.get_temp::<Thumb>(id)) {
-        return t;
-    }
-    if *budget == 0 {
-        return None;
-    }
-    *budget -= 1;
-    let thumb = (|| {
-        let imp = app.session.importer.clone()?;
-        let f = imp.probe(path).ok()?;
-        if !f.has_video {
-            return None;
-        }
-        // A synthetic item id keyed by the path (the frame cache keys on the path).
-        let hid = path.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3)) | (1 << 62);
-        let img = app.session.footage.frame(ItemId(hid), &f, effectcraft_engine::time::Tick::ZERO)?;
-        let step = (img.width.max(img.height) as f32 / 128.0).ceil().max(1.0) as u32;
-        let (w, h) = (img.width.div_ceil(step), img.height.div_ceil(step));
-        let full = img.to_rgba8();
-        let mut px = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                let i = (((y * step) * img.width + x * step) * 4) as usize;
-                px.extend_from_slice(&full[i..i + 4]);
-            }
-        }
-        let tex = ctx.load_texture(format!("mb-{path}"), egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px), egui::TextureOptions::LINEAR);
-        Some((tex, [w, h]))
-    })();
-    ctx.data_mut(|d| d.insert_temp(id, thumb.clone()));
-    thumb
-}
-
 /// The Favorites column: one clickable row per place, the current folder `dir` highlighted.
 fn places_column(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, side: Rect, places: &[(String, String)], dir: &str) {
     let t = app.tokens;
@@ -90,8 +53,6 @@ fn places_column(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
 /// drag out as [`DragPayload::Files`] and a context menu copies paths, imports (optionally into the
 /// comp) or adds a favourite. The listing is cached per folder and filter for a second, and every
 /// change runs a `mediaBrowser.*` command.
-=======
->>>>>>> 10410ff0 (android: the in-app file browser, shared storage and the picker view sizes)
 pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();

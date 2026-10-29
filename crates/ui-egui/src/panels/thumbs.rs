@@ -31,7 +31,7 @@ struct ThumbEntry {
 /// serve and re-cache the overwritten file's old frames.
 pub fn media(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
     let stamp = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
-    let id = egui::Id::new(("file-thumb", path));
+    let id = egui::Id::unique(("file-thumb", path));
     let saved: Option<ThumbEntry> = ctx.data(|d| d.get_temp::<Option<ThumbEntry>>(id)).unwrap_or(None);
     if let Some(saved) = saved
         && saved.stamp == stamp

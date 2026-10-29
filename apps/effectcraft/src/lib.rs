@@ -66,7 +66,7 @@ fn app_icon() -> egui::IconData {
 fn is_project_file(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
-        .and_then(|ext| ext.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|ext| ext.eq_ignore_ascii_case("ecproj") || ext.eq_ignore_ascii_case("ecprojx"))
 }
 
@@ -174,11 +174,44 @@ pub fn run_android(android_app: android_activity::AndroidApp, access: Option<Sha
     run_inner(Some(android_app), access)
 }
 
+/// The commands' file dialogs don't block the frame where the platform's backend would (#511,
+/// #1275): on macOS as sheets instead of nested modal loops, on Linux through the desktop portal
+/// from a worker thread — a blocking portal dialog leaves the main thread waiting on its answer
+/// without pumping events, so the window stops answering the compositor and the desktop offers to
+/// force-quit it while the Open dialog is up. Windows' blocking dialog pumps its own messages, so
+/// it keeps [`effectcraft_ui_egui::Hooks::pick_files`] and friends. The dialogs asked for in a
+/// frame show at its end ([`sheet_dialogs::show_asked`]), where the main window's handle is at
+/// hand. Android has no rfd at all: the in-app browser serves the dialogs there, so the whole
+/// plumbing stays desktop-only.
+#[cfg(not(target_os = "android"))]
+fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let (tx, rx) = std::sync::mpsc::channel::<sheet_dialogs::Asked>();
+        app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| {
+            if tx.send((dialog, done)).is_err() {
+                log::error!("file dialog: the window is gone");
+            }
+        }));
+        Some(rx)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = app;
+        None
+    }
+}
+
 /// Shared startup; `android_app` is the NativeActivity handle eframe needs on Android.
 fn run_inner(
     #[cfg(target_os = "android")] android_app: Option<android_activity::AndroidApp>,
     #[cfg(target_os = "android")] access: Option<SharedStorageAccess>,
 ) -> eframe::Result {
+    // Windows: the update helper is a copy of this program started with `--finish-update`.
+    #[cfg(windows)]
+    if let Some(result) = craft_update::self_update::finish(&craft_update::suite::EFFECTCRAFT, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(i32::from(result.is_err()));
+    }
     // First, so the panic hook and every start-up warning are recorded. Records go to stderr
     // and the session log; Help ▸ Enable Logging writes through this logger too, and warnings
     // feed the compatibility report.
@@ -263,6 +296,7 @@ fn run_inner(
         "EffectCraft",
         options,
         Box::new(move |cc| {
+            EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
             match &cc.wgpu_render_state {
                 Some(rs) => log::info!("graphics: {:?}", rs.adapter.get_info()),
                 None => log::info!("graphics: no wgpu device"),
@@ -306,9 +340,14 @@ fn run_inner(
             #[cfg(target_os = "android")]
             if let Some(l) = &android_layout {
                 if let Err(e) = android_storage::ensure(l) {
+                    // The contract: the affected feature stays off rather than crashing. Leaving
+                    // the config unset keeps settings absent (DirConfig reads would fail anyway)
+                    // instead of pointing them at a directory that could not be created, where
+                    // every write would then fail while creating its parent.
                     log::warn!("android storage: {e}");
+                } else {
+                    session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(l.config.clone())));
                 }
-                session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(l.config.clone())));
             }
             session.load_settings();
             // Fit the window to its monitor, or put it back where it was (still hidden).
@@ -342,6 +381,7 @@ fn run_inner(
             // reported in a toast and forgotten).
             let _ = session.execute("window.restoreScriptPanels", json!({}));
             let mut app = EffectcraftApp::new(session);
+            app.set_startup_update_check(true);
             app.set_gpu_failure_bridge(gpu_failures);
             app.ui.start_screen = show_home;
             if let Some(n) = notice {
@@ -432,17 +472,9 @@ fn run_inner(
                 }
             }
             // The commands' file dialogs don't block the frame where the platform's backend
-            // would (#511, #1275): on macOS as sheets instead of nested modal loops, on Linux
-            // through the desktop portal from a worker thread — a blocking portal dialog leaves
-            // the main thread waiting on its answer without pumping events, so the window stops
-            // answering the compositor and the desktop offers to force-quit it while the Open
-            // dialog is up. Windows' blocking dialog pumps its own messages; Android has no
-            // rfd at all (the in-app browser serves the dialogs).
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            {
-                let ctx = cc.egui_ctx.clone();
-                app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| sheet_dialogs::show(dialog, done, ctx.clone())));
-            }
+            // would (#511, #1275); see [`install_file_dialogs`].
+            #[cfg(not(target_os = "android"))]
+            let file_dialogs = install_file_dialogs(&mut app);
             #[cfg(target_os = "macos")]
             {
                 app.hooks.app_action = Some(Box::new(native_menu::app_action));
@@ -460,20 +492,19 @@ fn run_inner(
                 #[cfg(target_os = "macos")]
                 apple_events: apple_events.connect(&cc.egui_ctx),
                 app,
+                #[cfg(not(target_os = "android"))]
+                file_dialogs,
                 window: window::Tracker::new(opened, saved_window, control_port.is_none()),
                 launch,
                 drawn: false,
             }))
         }),
     );
-    match &result {
-        Ok(()) => log::info!("the window closed"),
-        Err(e) => {
-            if on_gl {
-                launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
-            }
-            startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
+    if let Err(e) = &result {
+        if on_gl {
+            launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
         }
+        startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
     }
     result
 }
@@ -545,6 +576,9 @@ fn startup_failed(e: &eframe::Error, gl_next: bool) {
 /// The desktop app: the egui app plus, on macOS, the system menu bar.
 struct Desktop {
     app: EffectcraftApp,
+    /// The commands' file dialogs, shown at the end of the frame that asked for them.
+    #[cfg(not(target_os = "android"))]
+    file_dialogs: Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>>,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
     /// Documents opened from Finder, the Dock or `open` (macOS).
@@ -558,14 +592,26 @@ struct Desktop {
 }
 
 impl eframe::App for Desktop {
+    /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick, close the IME pass, show the
+    /// file dialogs asked for and, last, hand a close to the platform quit.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.menu.update(&mut self.app, ctx);
-        self.app.logic(ctx, frame);
+        self.app.tick(ctx, frame);
+        self.app.finish_ime_logic(ctx);
+        #[cfg(not(target_os = "android"))]
+        if let Some(asked) = &self.file_dialogs {
+            sheet_dialogs::show_asked(asked, frame, ctx);
+        }
+        effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        #[cfg(not(target_os = "android"))]
+        if let Some(asked) = &self.file_dialogs {
+            sheet_dialogs::show_asked(asked, frame, ui.ctx());
+        }
         self.window.frame(ui.ctx(), self.app.session.config.as_deref());
         if !self.drawn {
             self.drawn = true;
@@ -579,6 +625,9 @@ impl eframe::App for Desktop {
     }
 
     fn on_exit(&mut self) {
+        // On macOS the app quits through `-[NSApplication terminate:]`, and the process ends
+        // before `eframe::run_native` returns (#341).
+        log::info!("the window is closing");
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
@@ -621,8 +670,7 @@ fn disable_app_nap() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, parse_args, sheet_dialogs};
-    use effectcraft_ui_egui::{DialogDone, FileDialog};
+    use super::{Args, parse_args};
     use std::env::VarError;
 
     fn parse_env(args: &[&str], env_port: Result<String, VarError>) -> Result<Option<Args>, String> {
@@ -763,17 +811,16 @@ mod tests {
     /// #1275: a blocking desktop-portal dialog on Linux leaves the window not answering the
     /// compositor while it is open, so the commands' file dialogs go through the non-blocking
     /// host hook there (as they do on macOS, #511). Windows' dialog pumps its own messages.
+    /// The test runs the startup path's own installer, so removing the startup assignment
+    /// cannot leave the hook silently unset while the test still passes.
     #[test]
+    #[cfg(not(target_os = "android"))]
     fn commands_file_dialogs_go_through_the_non_blocking_hook() {
         let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        let asked = crate::install_file_dialogs(&mut app);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        {
-            let ctx = egui::Context::default();
-            app.hooks.file_dialog_async = Some(Box::new(move |dialog: FileDialog, done: DialogDone| sheet_dialogs::show(dialog, done, ctx.clone())));
-        }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        assert!(app.hooks.file_dialog_async.is_some(), "the commands' file dialogs must not block the frame");
+        assert!(app.hooks.file_dialog_async.is_some() && asked.is_some(), "the commands' file dialogs must not block the frame");
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        assert!(app.hooks.file_dialog_async.is_none(), "the blocking dialog pumps its own messages here");
+        assert!(app.hooks.file_dialog_async.is_none() && asked.is_none(), "the blocking dialog pumps its own messages here");
     }
 }
